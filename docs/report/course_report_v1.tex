@@ -1,0 +1,136 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{NYC Multimodal Access: Probabilistic Wait and Travel Models \\ \large Component 1 \& 2 Report (V1)}
+\author{ECE 225A Course Project Team}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report documents the first two components of our NYC multi-modal decision aid: (i) dispersion-aware wait-time modeling for taxi zones and Citi Bike stations, and (ii) probabilistic travel-time modeling for both modes that balances empirical Gamma fits with lightweight regression backstops.  We emphasize the theoretical framing (Poisson vs.\ Negative-Binomial arrival processes, exponential inter-arrivals, Gamma regression), implementation specifics, and major limitations discovered so far.  Figures are derived directly from the January~2024 TLC Yellow Taxi and Citi Bike datasets bundled with the repository, ensuring the report remains self-contained even without the accompanying Streamlit demo.
+\end{abstract}
+
+\section{Introduction}
+Real-time multimodal routing requires two stochastic ingredients: a distribution over \emph{wait times} (how long until a vehicle becomes available) and a distribution over \emph{travel times} (how long the trip itself will take).  Textbook treatments often assume homogeneous Poisson arrivals and deterministic speeds, forcing the naive heuristic $E[\text{wait}] = 1/\lambda$.  Our course project relaxes these assumptions by:
+\begin{enumerate}[label=\textbf{C\arabic*.}]
+    \item Modeling per-zone arrivals using Negative-Binomial (NB) distributions with empirical inter-arrival summaries cached for every hour.
+    \item Modeling travel minutes via method-of-moments Gamma fits over equal-width distance bins, backed up by interpretable linear regression coefficients.
+\end{enumerate}
+The Streamlit interface (linked on the course website) calls into these caches to provide instant recommendations, but the statistical insights are summarized here.
+
+\section{Data and Preprocessing}
+We ingest January~2024 samples from two public feeds:
+\begin{itemize}
+    \item \textbf{Taxi}: TLC Yellow Taxi parquet (\texttt{data/raw/yellow\_tripdata\_2024-01.parquet}).  Events are timestamped pickup times with TLC zone IDs.
+    \item \textbf{Citi Bike}: Monthly CSVs (\texttt{data/raw/citibike/202401\ldots csv}) with trip start/end coordinates.
+\end{itemize}
+All timestamps are converted to naive Eastern time.  For Component~1 we bucket arrivals by hour and compute nearest-neighbor centroids for map interaction.  For Component~2 we derive straight-line distances via the haversine formula, cap rides to $0{-}12$~km and $1{-}120$~minutes, and tag rush/off-peak (7--10, 16--19) plus weekday/weekend flags.
+
+\section{Component 1: Wait-Time Modeling}
+\subsection{From Poisson to Negative-Binomial}
+Classical queueing notes argue that Poisson arrivals imply exponential inter-arrivals ($\mathbb{E}[W]=1/\lambda$).  However, empirical dispersion $D=\frac{\operatorname{Var}(N)}{\mathbb{E}[N]}$ for hourly taxi counts ranges from 2--10, violating the unit-dispersion requirement.  Figure~\ref{fig:poisson-mismatch} revisits Midtown Center and visualizes the heavy tail that a Poisson overlay cannot capture.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/poisson_midtown_rush.pdf}
+    \caption{Poisson vs.\ empirical arrivals for Midtown Center (weekday rush).  The low-count spike and heavy tail motivate NB modeling.}
+    \label{fig:poisson-mismatch}
+\end{figure}
+
+\subsection{Empirical Dispersion Landscape}
+We summarize each $(\text{zone}, \text{hour})$ pair by its mean arrivals, dispersion, and empirical mean inter-arrival minutes (computed after removing $<10$~sec and $>180$~min gaps).  Figure~\ref{fig:taxi-dispersion} shows how dispersion grows with load---a combination of bursty demand and supply shortages near nightlife corridors.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/taxi_wait_dispersion.png}
+    \caption{Taxi hourly dispersion vs.\ mean arrivals (color = empirical mean wait).  Even at 80+ arrivals/hour, dispersion often exceeds 3, so $1/\lambda$ underestimates wait.}
+    \label{fig:taxi-dispersion}
+\end{figure}
+
+\subsection{Caching Strategy}
+The helper \texttt{src/modeling/wait\_times.py}:
+\begin{enumerate}[label=\alph*)]
+    \item Loads raw events, floors times to hourly buckets, and stores $(\mu, \sigma^2, D, r, p)$ for each location/hour.
+    \item Computes inter-arrival gaps to cache $\overline{W}_{\text{emp}}$ with sample counts.  Cells with $<5$ gaps fall back to the Poisson-based $60/\mu$ estimate.
+    \item Persists into \texttt{outputs/wait\_stats/\{taxi,bike\}\_hourly\_waits.parquet} for direct ingestion by the app or offline analysis.
+\end{enumerate}
+
+\section{Component 2: Travel-Time Modeling}
+\subsection{Gamma Fits per Distance Bin}
+We group rides by equal-width 2~km bins (0--2, 2--4, \dots, 10--12) crossed with rush/off-peak and weekday/weekend.  For each cell we compute a method-of-moments Gamma:
+\[
+k = \frac{\mu^2}{\sigma^2}, \qquad
+\theta = \frac{\sigma^2}{\mu}.
+\]
+Cells with $\ge 50$ samples retain $(k,\theta)$, while sparser bins defer to regression.  Figure~\ref{fig:travel-heatmap} visualizes the resulting mean matrix---rush-hour taxis balloon past 20 minutes for 10--12~km rides, whereas bikes shine on short weekday commutes.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/travel_heatmap.png}
+    \caption{Mean travel minutes by mode, distance bin, and cohort.  Bins lacking 50+ samples are imputed later via regression.}
+    \label{fig:travel-heatmap}
+\end{figure}
+
+\subsection{Regression Backstop}
+Using the same filtered dataset, we fit per-mode ordinary least squares regressions:
+\[
+T = \beta_0 + \beta_d \cdot d + \beta_r \cdot \mathbf{1}\{\text{rush}\} + \beta_w \cdot \mathbf{1}\{\text{weekend}\}.
+\]
+The coefficients (Equation~\ref{eq:taxi-reg}) provide interpretable baselines ready for out-of-sample bins:
+\begin{align}
+T_{\text{taxi}} &= 4.66 + 2.42\, d + 0.75\,\mathbf{1}\{\text{rush}\} - 1.03\,\mathbf{1}\{\text{weekend}\}, \label{eq:taxi-reg}\\
+T_{\text{bike}} &= 2.75 + 4.17\, d - 0.23\,\mathbf{1}\{\text{rush}\} + 0.25\,\mathbf{1}\{\text{weekend}\}. \nonumber
+\end{align}
+Backup logic therefore follows:
+\begin{enumerate}[label=\roman*)]
+    \item If Gamma stats exist and include $\ge 50$ rides, use $\mu_{\text{Gamma}}$.
+    \item Else compute the regression value and clamp to $\ge 2$ minutes.
+    \item Else fall back to the coarse fixed-speed heuristic (15~km/h taxi, 12~km/h bike).
+\end{enumerate}
+
+\section{System Integration}
+The Streamlit application (\texttt{streamlit\_app.py}) performs three lookups per mode:
+\begin{enumerate}
+    \item \textbf{Wait}: nearest zone/station $\rightarrow$ hourly wait via the cache (empirical $\rightarrow$ Poisson $\rightarrow 1/\lambda$).
+    \item \textbf{Walk}: straight-line origin to centroid distance with a 5~km/h walking speed.
+    \item \textbf{Travel}: direct haversine distance $\rightarrow$ Gamma/regression estimate via \texttt{travel\_times.py}.
+\end{enumerate}
+Outputs are shown as a ranking table plus a stacked explanation (walk + wait + travel).  Figure~\ref{fig:tail-bounds} and Figure~\ref{fig:nb-tail} illustrate ancillary diagnostics we include in the appendix for completeness, tying the course deliverable to theoretical topics such as Chernoff bounds and NB tail probabilities.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/tail_bounds_weekday_rush.pdf}
+    \caption{Tail risk for weekday rush: empirical vs.\ Poisson/NB predictions and classical inequalities.}
+    \label{fig:tail-bounds}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/nb_weekend_tail.pdf}
+    \caption{Weekend NB tail curves compared to empirical exceedance; demonstrates the benefit of dispersion-aware modeling.}
+    \label{fig:nb-tail}
+\end{figure}
+
+\section{Limitations and Future Work}
+\begin{itemize}
+    \item \textbf{Data coverage}: January samples miss seasonal effects (tourism spikes, weather).  Travel bins with $<50$ rides default to regression, which may misrepresent rare but important corridors.
+    \item \textbf{Spatial homogeneity}: We rely on straight-line distances and nearest centroids.  Actual street networks introduce asymmetric travel times absent from the current cache.
+    \item \textbf{Station availability}: Citi Bike wait estimates assume the presence of a bike once inter-arrival gaps are measured, but we ignore dock saturation (no bikes available) and battery level for e-bikes.
+    \item \textbf{Model assumptions}: NB moments assume independence between riders; regression assumes linear dependence on distance/rush/weekend only.  Neither captures precipitation, surge pricing, or micro-events.
+    \item \textbf{Evaluation}: We currently validate via historical goodness-of-fit plots.  A full academic report should include backtesting (e.g., rolling origin/destination pairs) and a comparison to baseline heuristics on held-out trips.
+\end{itemize}
+
+\section{Conclusion}
+Components 1 and 2 replace naive heuristics with academically grounded probabilistic surrogates that match the ECE~225A emphasis on stochastic modeling.  The modular cache architecture lets us plug these models into both the Streamlit dashboard and future notebooks without recomputing expensive statistics.  Next steps include subway headway estimation (Component~3) and integrating user-centric penalty models before preparing the final poster and website link.
+
+\end{document}
