@@ -1,5 +1,5 @@
 """
-Component 2 travel-time modeling helper.
+Travel-time modeling helper.
 
 Loads bin-level Gamma stats and lognormal GLM coefficients so the Streamlit app
 can query travel minutes per mode.
@@ -43,10 +43,19 @@ def assign_distance_bin(dist_km: float) -> Optional[str]:
 def _load_bin_stats(stats_dir: Path) -> pd.DataFrame:
     path = stats_dir / "travel_bins.parquet"
     if not path.exists():
-        raise FileNotFoundError(
-            f"Missing travel bins cache at {path}. "
-            "Run scripts/component2_build_travel_stats.py first."
-        )
+        columns = [
+            "mode",
+            "distance_bin",
+            "is_rush",
+            "is_weekend",
+            "sample_count",
+            "mean_min",
+            "var_min",
+            "gamma_k",
+            "gamma_theta",
+        ]
+        print(f"[travel_times] Warning: {path} missing. Gamma fallback unavailable.")
+        return pd.DataFrame(columns=columns)
     df = pd.read_parquet(path)
     return df
 
@@ -103,6 +112,8 @@ def lognormal_prediction(
     distance_km: float,
     is_rush: bool,
     is_weekend: bool,
+    *,
+    is_ebike: bool = False,
     stats_dir: Path = DEFAULT_STATS_DIR,
 ) -> Optional[TravelEstimate]:
     _, payload = get_stats(stats_dir)
@@ -119,6 +130,7 @@ def lognormal_prediction(
         "distance_sq": distance_km ** 2,
         "is_rush": 1.0 if is_rush else 0.0,
         "is_weekend": 1.0 if is_weekend else 0.0,
+        "is_ebike": 1.0 if is_ebike else 0.0,
     }
     mu = 0.0
     for name, value in features.items():
@@ -157,11 +169,18 @@ def estimate_travel_minutes(
     *,
     is_rush: bool,
     is_weekend: bool,
+    rideable_type: Optional[str] = None,
     stats_dir: Path = DEFAULT_STATS_DIR,
     speed_fallback_kmh: float = 10.0,
 ) -> TravelEstimate:
+    is_ebike = bool(rideable_type and str(rideable_type).lower() == "electric_bike")
     lognormal_est = lognormal_prediction(
-        mode, distance_km, is_rush, is_weekend, stats_dir=stats_dir
+        mode,
+        distance_km,
+        is_rush,
+        is_weekend,
+        is_ebike=is_ebike,
+        stats_dir=stats_dir,
     )
     if lognormal_est:
         return lognormal_est

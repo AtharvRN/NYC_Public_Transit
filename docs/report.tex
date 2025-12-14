@@ -23,7 +23,7 @@
 \maketitle
 
 \begin{abstract}
-We build a reproducible pipeline for comparing New York City taxi and Citi Bike service quality. Component~1 estimates rider wait times by modeling arrivals as Poisson / Negative-Binomial processes and translating inter-arrival times into exponential wait-time distributions. Component~2 focuses on travel-time estimation: we fit discrete Gamma distributions per distance cohort and a continuous lognormal accelerated failure-time model that removes the need for coarse bins. Both components feed a Streamlit decision-support dashboard. This report describes the data, modeling choices, UX considerations, and future work.
+We build a reproducible pipeline for comparing New York City taxi and Citi Bike service quality. The first pillar estimates rider wait times by modeling quarter-hour arrivals (split by rush/off-peak and weekday/weekend) as Poisson / Negative-Binomial processes and translating inter-arrival times into exponential wait-time distributions. The second pillar focuses on travel-time estimation: we fit discrete Gamma distributions per distance cohort and a continuous lognormal accelerated failure-time model—augmented with an e-bike indicator—that removes the need for coarse bins. Both tracks feed a Streamlit decision-support dashboard backed by cached Parquet/JSON artifacts. This report describes the data, modeling choices, UX considerations, and future work.
 \end{abstract}
 
 \section{Problem Setup}
@@ -47,16 +47,24 @@ Assumptions include:
 
 \textbf{Derived artifacts.} Scripts generate:
 \begin{itemize}[nosep]
-  \item Station-level rate summaries (`taxi\_rates.parquet`, `citibike\_rates.parquet`).
+  \item Station-level rate summaries (`taxi\_rates.parquet`, `citibike\_rates.parquet`) and zone/station coordinates.
+  \item Wait-time caches (`taxi\_hourly\_waits.parquet/json`, `bike\_hourly\_waits.parquet/json`) with per-hour, rush/off-peak, weekend/weekday metrics.
   \item Travel-time bin stats (`travel\_bins.parquet`) and lognormal GLM coefficients (`travel\_lognormal\_glm.json`).
 \end{itemize}
 
+\textbf{Builder scripts.} After notebook exploration we persist the fitted distributions via:
+\begin{enumerate}[nosep]
+  \item \texttt{python scripts/build\_wait\_stats.py --taxi-paths data/raw/yellow\_tripdata\_2024-*.parquet --cache-dir data/derived/wait\_stats --force}
+  \item \texttt{python scripts/build\_travel\_stats.py --bike-root data/raw/citibike --bike-glob '20240*-citibike-tripdata\_*.csv' --output-dir data/derived/travel\_stats}
+\end{enumerate}
+These commands read the raw Parquet/CSV files, aggregate by the desired cohorts, and overwrite the caches consumed by Streamlit.
+
 \section{Wait-Time \& Arrival Modeling}
 \subsection{Arrivals}
-For each taxi zone and Citi Bike station we bucket arrivals into 5/15/30/60-minute windows. We require a minimum average rate (e.g., 1 taxi per 15 minutes) and a non-zero proportion threshold to focus on active locations. Method-of-moments Negative-Binomial fits (parameters $(r,p)$) capture over-dispersion; Poisson curves are plotted as baselines.
+For each taxi zone and Citi Bike station we bucket arrivals into 5/15/30/60-minute windows (15 minutes by default). All cohorts are further stratified by hour of day, rush vs off-peak, and weekday vs weekend so we can cache context-specific rates. We require a minimum average rate (e.g., 1 taxi per 15 minutes) and a non-zero proportion threshold to focus on active locations. Method-of-moments Negative-Binomial fits (parameters $(r,p)$) capture over-dispersion; Poisson curves are plotted as baselines.
 
 \subsection{Wait Times}
-Given an arrival process with mean $\lambda$, the expected wait time for a passenger is $\frac{1}{\lambda}$ (memoryless exponential). We validate this by computing empirical inter-arrival gaps and overlaying exponential PDFs. See Fig.~\ref{fig:wait-static} for a representative screenshot (placeholder).
+Given an arrival process with mean $\lambda$, the expected wait time for a passenger is $\frac{1}{\lambda}$ (memoryless exponential). We validate this by computing empirical inter-arrival gaps for each (zone/station, hour, rush flag, weekend flag) cell and overlaying exponential PDFs. The resulting parameters are persisted in `wait\_stats/*` and the Streamlit app uses the cached exponential mean, falling back to the nearest station with adequate samples if a specific cohort is sparse. See Fig.~\ref{fig:wait-static} for a representative screenshot (placeholder).
 
 \begin{figure}[t]
   \centering
@@ -72,9 +80,9 @@ Trips are bucketed by mode, 2 km distance bins (0--2, 2--4, \ldots, 10--12 km), 
 \subsection{Lognormal GLM}
 To remove binning artifacts we fit a lognormal accelerated failure-time model:
 \[
-  \log(\text{travel\_min}) = \beta_0 + \beta_1 d + \beta_2 d^2 + \beta_3 \text{rush} + \beta_4 \text{weekend} + \varepsilon,
+  \log(\text{travel\_min}) = \beta_0 + \beta_1 d + \beta_2 d^2 + \beta_3 \text{rush} + \beta_4 \text{weekend} + \beta_5 \text{is\_ebike} + \varepsilon,
 \]
-with $\varepsilon \sim \mathcal{N}(0, \sigma^2)$. The expected travel time is $\mathbb{E}[T] = \exp(\mu + \tfrac{1}{2}\sigma^2)$. We evaluate MAE/RMSE per mode (Table~\ref{tab:errors}) and include combined histograms (Gamma vs lognormal) in the notebook (Fig.~\ref{fig:travel-static} placeholder).
+with $\varepsilon \sim \mathcal{N}(0, \sigma^2)$. The expected travel time is $\mathbb{E}[T] = \exp(\mu + \tfrac{1}{2}\sigma^2)$. We evaluate MAE/RMSE per mode (Table~\ref{tab:errors}) and include combined histograms (Gamma vs lognormal) in the notebook (Fig.~\ref{fig:travel-static} placeholder). The e-bike indicator captures the faster Citi Bike cohorts surfaced by our auxiliary speed analysis.
 
 \begin{table}[h]
   \centering
@@ -103,7 +111,7 @@ with $\varepsilon \sim \mathcal{N}(0, \sigma^2)$. The expected travel time is $\
 The front end (\url{https://github.com/AtharvRN/NYC_Public_Transit}) uses Streamlit to let users:
 \begin{itemize}[nosep]
   \item Pick origin/destination on an interactive map (Folium).
-  \item View taxi vs bike wait times for the selected locations.
+  \item View taxi vs bike wait times for the selected locations, with automatic fallbacks to the nearest station if the exact cohort is missing.
   \item See travel-time estimates using the lognormal GLM (with Gamma fallback).
   \item Compare total journey time distributions.
 \end{itemize}
@@ -120,14 +128,15 @@ Tabs separate taxi/bike diagnostics; tooltips explain why certain cohorts are di
 
 \section{Limitations \& Future Work}
 \begin{itemize}[nosep]
-  \item \textbf{Modeling assumptions:} Wait-times use inter-arrival proxies; no weather or traffic features; GLM only uses distance/rush/weekend.
-  \item \textbf{Data coverage:} Only Jan--Jun 2024; Citi Bike GPS routes or e-bike vs classic distinctions are ignored.
+  \item \textbf{Modeling assumptions:} Wait-times use inter-arrival proxies; no weather or traffic features; GLM only uses distance/rush/weekend/e-bike.
+  \item \textbf{Data coverage:} Only Jan--Jun 2024; Citi Bike GPS routes or real-time inventory (docks per station) are not modeled.
+  \item \textbf{Costs:} Trip fares are not surfaced; taxi Parquet files contain the needed columns but Citi Bike pricing must be inferred from membership tiers.
   \item \textbf{Scalability:} Subway data is not integrated yet—downloading GTFS and MTA ridership feeds is planned but time-consuming.
   \item \textbf{Future features:} Add uncertainty bands, enable user-uploaded O/D pairs, integrate subway travel-time estimators, and experiment with probabilistic travel-time percentiles.
 \end{itemize}
 
 \section{Conclusion}
-We delivered a reproducible workflow: raw data ingestion, exploratory notebooks, lognormal travel-time modeling, and a Streamlit app. The lognormal GLM improves Citi Bike estimates substantially over Gamma bins while keeping the pipeline explainable. Next steps include richer covariates, subway integration, and automated CI for the derived artifacts.
+We delivered a reproducible workflow: raw data ingestion, exploratory notebooks, lognormal travel-time modeling with e-bike adjustments, cached wait-time summaries, and a Streamlit app that gracefully degrades to nearby stations. The lognormal GLM improves Citi Bike estimates substantially over Gamma bins while keeping the pipeline explainable. Next steps include richer covariates, explicit cost modeling, subway integration, and automated CI for the derived artifacts.
 
 \begin{thebibliography}{9}
 \bibitem{nyctlc} NYC Taxi \& Limousine Commission, ``TLC Trip Record Data,'' \url{https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page}
