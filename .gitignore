@@ -12,7 +12,7 @@ nyc/
 .DS_Store
 
 # Large data/outputs (regenerate from scripts)
-/data/
+/data/raw/
 /outputs/
 /notebooks/.ipynb_checkpoints/
 /docs/Gender_diversity.pdf
