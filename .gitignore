@@ -12,13 +12,9 @@ nyc/
 .DS_Store
 
 # Large data/outputs (regenerate from scripts)
-/data/
+/data/raw/
 /outputs/
 /notebooks/.ipynb_checkpoints/
-/docs/Gender_diversity.pdf
-/docs/H1B_Visa_Approval_Analysis_Prediction.pdf
-/docs/Product_Rating.pdf
-/docs/Predictive_Maintenance.pdf
 
 # LaTeX build artifacts
 *.aux
