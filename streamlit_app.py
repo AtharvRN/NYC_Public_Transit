@@ -241,26 +241,30 @@ folium.PolyLine(
 
 # Add taxi zones (light background)
 taxi_group = folium.FeatureGroup(name='Taxi Zones')
-for _, r in centroids.sample(min(100, len(centroids)), random_state=0).iterrows():
-    folium.CircleMarker(
-        location=[r.lat, r.lon],
-        radius=2,
-        color='orange',
-        fill=True,
-        fill_opacity=0.2
-    ).add_to(taxi_group)
+for _, r in centroids.iterrows():
+        folium.CircleMarker(
+            location=[r.lat, r.lon],
+            radius=2,
+            color='orange',
+            fill=True,
+            fill_opacity=0.25,
+            tooltip=f"Taxi Zone {int(r.PULocationID)}",
+            popup=f"Zone ID: {int(r.PULocationID)}"
+        ).add_to(taxi_group)
 taxi_group.add_to(fmap)
 
 # Add bike stations (light background)
 if stations is not None and not stations.empty:
     bike_group = folium.FeatureGroup(name='Bike Stations')
-    for _, r in stations.sample(min(100, len(stations)), random_state=0).iterrows():
+    for _, r in stations.iterrows():
         folium.CircleMarker(
             location=[r.lat, r.lon],
             radius=2,
-            color='blue',
+            color='dodgerblue',
             fill=True,
-            fill_opacity=0.2
+            fill_opacity=0.35,
+            tooltip=f"Station {r.start_station_id}",
+            popup=f"Station ID: {r.start_station_id}"
         ).add_to(bike_group)
     bike_group.add_to(fmap)
 
