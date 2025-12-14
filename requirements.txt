@@ -9,3 +9,6 @@ seaborn>=0.13
 nbformat>=5.10
 jupyterlab>=4.3
 scipy>=1.11
+streamlit>=1.32
+streamlit-folium>=0.21
+folium>=0.15
