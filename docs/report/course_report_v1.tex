@@ -1,5 +1,5 @@
-\documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
+\documentclass[11pt,twocolumn]{article}
+\usepackage[margin=0.8in]{geometry}
 \usepackage{graphicx}
 \usepackage{subcaption}
 \usepackage{booktabs}
@@ -81,45 +81,16 @@ Cells with $\ge 50$ samples retain $(k,\theta)$, while sparser bins defer to reg
     \label{fig:travel-heatmap}
 \end{figure}
 
-\subsection{Regression Backstop}
-Using the same filtered dataset, we fit per-mode ordinary least squares regressions:
-\[
-T = \beta_0 + \beta_d \cdot d + \beta_r \cdot \mathbf{1}\{\text{rush}\} + \beta_w \cdot \mathbf{1}\{\text{weekend}\}.
-\]
-The coefficients (Equation~\ref{eq:taxi-reg}) provide interpretable baselines ready for out-of-sample bins:
-\begin{align}
-T_{\text{taxi}} &= 4.66 + 2.42\, d + 0.75\,\mathbf{1}\{\text{rush}\} - 1.03\,\mathbf{1}\{\text{weekend}\}, \label{eq:taxi-reg}\\
-T_{\text{bike}} &= 2.75 + 4.17\, d - 0.23\,\mathbf{1}\{\text{rush}\} + 0.25\,\mathbf{1}\{\text{weekend}\}. \nonumber
-\end{align}
-Backup logic therefore follows:
-\begin{enumerate}[label=\roman*)]
-    \item If Gamma stats exist and include $\ge 50$ rides, use $\mu_{\text{Gamma}}$.
-    \item Else compute the regression value and clamp to $\ge 2$ minutes.
-    \item Else fall back to the coarse fixed-speed heuristic (15~km/h taxi, 12~km/h bike).
-\end{enumerate}
+As of the January 2024 aggregation, every bin surpasses the 50-ride threshold, so the Streamlit app always consumes the empirical Gamma mean. We keep a small regression helper (\texttt{travel\_times.py}) for future, finer-grained cohorts, but it is currently dormant.
 
 \section{System Integration}
 The Streamlit application (\texttt{streamlit\_app.py}) performs three lookups per mode:
 \begin{enumerate}
     \item \textbf{Wait}: nearest zone/station $\rightarrow$ hourly wait via the cache (empirical $\rightarrow$ Poisson $\rightarrow 1/\lambda$).
     \item \textbf{Walk}: straight-line origin to centroid distance with a 5~km/h walking speed.
-    \item \textbf{Travel}: direct haversine distance $\rightarrow$ Gamma/regression estimate via \texttt{travel\_times.py}.
+    \item \textbf{Travel}: direct haversine distance $\rightarrow$ Gamma estimate via \texttt{travel\_times.py}.
 \end{enumerate}
-Outputs are shown as a ranking table plus a stacked explanation (walk + wait + travel).  Figure~\ref{fig:tail-bounds} and Figure~\ref{fig:nb-tail} illustrate ancillary diagnostics we include in the appendix for completeness, tying the course deliverable to theoretical topics such as Chernoff bounds and NB tail probabilities.
-
-\begin{figure}[h]
-    \centering
-    \includegraphics[width=0.9\textwidth]{figures/tail_bounds_weekday_rush.pdf}
-    \caption{Tail risk for weekday rush: empirical vs.\ Poisson/NB predictions and classical inequalities.}
-    \label{fig:tail-bounds}
-\end{figure}
-
-\begin{figure}[h]
-    \centering
-    \includegraphics[width=0.75\textwidth]{figures/nb_weekend_tail.pdf}
-    \caption{Weekend NB tail curves compared to empirical exceedance; demonstrates the benefit of dispersion-aware modeling.}
-    \label{fig:nb-tail}
-\end{figure}
+Outputs are shown as a ranking table plus a stacked explanation (walk + wait + travel).
 
 \section{Limitations and Future Work}
 \begin{itemize}
