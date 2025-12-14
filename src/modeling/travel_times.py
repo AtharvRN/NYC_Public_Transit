@@ -1,8 +1,8 @@
 """
 Component 2 travel-time modeling helper.
 
-Loads bin-level Gamma stats (from scripts/component2_build_travel_stats.py) and
-regression fallbacks so the Streamlit app can query travel minutes per mode.
+Loads bin-level Gamma stats and lognormal GLM coefficients so the Streamlit app
+can query travel minutes per mode.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_STATS_DIR = PROJECT_ROOT / "outputs" / "travel_stats"
+DEFAULT_STATS_DIR = PROJECT_ROOT / "data" / "derived" / "travel_stats"
 BIN_WIDTH_KM = 2.0
 MAX_DISTANCE_KM = 12.0
 GAMMA_MIN_SAMPLES = 50
@@ -51,8 +51,8 @@ def _load_bin_stats(stats_dir: Path) -> pd.DataFrame:
     return df
 
 
-def _load_regression(stats_dir: Path) -> Dict[str, Dict[str, float]]:
-    path = stats_dir / "travel_regression.json"
+def _load_lognormal(stats_dir: Path) -> Dict[str, Dict]:
+    path = stats_dir / "travel_lognormal_glm.json"
     if not path.exists():
         return {}
     return json.loads(path.read_text())
@@ -62,8 +62,8 @@ def _load_regression(stats_dir: Path) -> Dict[str, Dict[str, float]]:
 def get_stats(stats_dir: Path = DEFAULT_STATS_DIR):
     stats_dir = Path(stats_dir)
     bin_df = _load_bin_stats(stats_dir)
-    reg = _load_regression(stats_dir)
-    return bin_df, reg
+    lognormal = _load_lognormal(stats_dir)
+    return bin_df, lognormal
 
 
 def lookup_gamma_mean(
@@ -98,29 +98,47 @@ def lookup_gamma_mean(
     )
 
 
-def regression_fallback(
+def lognormal_prediction(
     mode: str,
     distance_km: float,
     is_rush: bool,
     is_weekend: bool,
     stats_dir: Path = DEFAULT_STATS_DIR,
-    min_minutes: float = 2.0,
 ) -> Optional[TravelEstimate]:
-    _, reg = get_stats(stats_dir)
-    coeffs = reg.get(mode)
-    if not coeffs:
+    _, payload = get_stats(stats_dir)
+    models = (payload or {}).get("models", {})
+    metrics = (payload or {}).get("metrics", {})
+    model = models.get(mode)
+    if not model:
         return None
-    minutes = (
-        coeffs["intercept"]
-        + coeffs["beta_distance"] * distance_km
-        + coeffs["beta_rush"] * (1 if is_rush else 0)
-        + coeffs["beta_weekend"] * (1 if is_weekend else 0)
-    )
-    minutes = max(min_minutes, float(minutes))
+    coeffs = model.get("coefficients", {})
+    sigma = float(model.get("sigma", float("nan")))
+    features = {
+        "const": 1.0,
+        "distance_km": distance_km,
+        "distance_sq": distance_km ** 2,
+        "is_rush": 1.0 if is_rush else 0.0,
+        "is_weekend": 1.0 if is_weekend else 0.0,
+    }
+    mu = 0.0
+    for name, value in features.items():
+        mu += float(coeffs.get(name, 0.0)) * value
+    if not np.isfinite(mu):
+        return None
+    if not np.isfinite(sigma) or sigma <= 0:
+        sigma = 0.0
+    mean_minutes = float(np.exp(mu + 0.5 * sigma ** 2))
+    metric_info = metrics.get(mode, {})
+    details = {
+        "sigma_log": sigma,
+        "coefficients": coeffs,
+        "samples": float(metric_info.get("samples", 0.0)),
+        "r_squared_log": float(metric_info.get("r_squared_log", float("nan"))),
+    }
     return TravelEstimate(
-        source="regression",
-        minutes=minutes,
-        details=coeffs,
+        source="lognormal_glm",
+        minutes=mean_minutes,
+        details=details,
     )
 
 
@@ -142,6 +160,12 @@ def estimate_travel_minutes(
     stats_dir: Path = DEFAULT_STATS_DIR,
     speed_fallback_kmh: float = 10.0,
 ) -> TravelEstimate:
+    lognormal_est = lognormal_prediction(
+        mode, distance_km, is_rush, is_weekend, stats_dir=stats_dir
+    )
+    if lognormal_est:
+        return lognormal_est
+
     distance_bin = assign_distance_bin(distance_km)
     if distance_bin:
         gamma_est = lookup_gamma_mean(
@@ -149,11 +173,6 @@ def estimate_travel_minutes(
         )
         if gamma_est:
             return gamma_est
-    reg_est = regression_fallback(
-        mode, distance_km, is_rush, is_weekend, stats_dir=stats_dir
-    )
-    if reg_est:
-        return reg_est
     return legacy_speed_fallback(distance_km, speed_fallback_kmh)
 
 

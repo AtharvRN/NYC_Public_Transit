@@ -2,9 +2,9 @@
 """
 Build Component 2 travel-time statistics for taxi and Citi Bike trips.
 
-Outputs two cache files:
+Outputs cache files:
 1. Parquet with Gamma-fit stats per (mode, distance_bin, rush_flag, weekend_flag)
-2. JSON with regression coefficients per mode
+2. JSON with lognormal GLM coefficients/metrics per mode
 """
 
 from __future__ import annotations
@@ -16,11 +16,12 @@ from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data" / "raw"
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / "travel_stats"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "derived" / "travel_stats"
 
 BIN_WIDTH_KM = 2.0
 MAX_DISTANCE_KM = 12.0  # filter trips beyond this to keep equal-width bins
@@ -192,24 +193,54 @@ def summarize_bins(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def fit_regression(df: pd.DataFrame, mode: str) -> Dict[str, float]:
-    subset = df[df["mode"] == mode]
-    if len(subset) < REGRESSION_MIN_SAMPLES:
-        raise ValueError(
-            f"Need at least {REGRESSION_MIN_SAMPLES} samples for {mode} regression."
-        )
-    x = np.column_stack(
-        [
-            np.ones(len(subset)),
-            subset["distance_km"].values,
-            subset["is_rush"].astype(int).values,
-            subset["is_weekend"].astype(int).values,
-        ]
+def build_lognormal_design(df: pd.DataFrame) -> pd.DataFrame:
+    design = pd.DataFrame(
+        {
+            "distance_km": df["distance_km"],
+            "distance_sq": df["distance_km"] ** 2,
+            "is_rush": df["is_rush"].astype(int),
+            "is_weekend": df["is_weekend"].astype(int),
+        }
     )
-    y = subset["travel_min"].values
-    beta, *_ = np.linalg.lstsq(x, y, rcond=None)
-    keys = ["intercept", "beta_distance", "beta_rush", "beta_weekend"]
-    return dict(zip(keys, beta))
+    return sm.add_constant(design, has_constant="add")
+
+
+def fit_lognormal_glm(df: pd.DataFrame) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    models: Dict[str, Dict[str, float]] = {}
+    metrics: Dict[str, Dict[str, float]] = {}
+
+    for mode in sorted(df["mode"].unique()):
+        subset = df[df["mode"] == mode]
+        if len(subset) < REGRESSION_MIN_SAMPLES:
+            print(
+                f"Skipping lognormal GLM for {mode}: need at least {REGRESSION_MIN_SAMPLES} samples (have {len(subset)})"
+            )
+            continue
+
+        design = build_lognormal_design(subset)
+        log_minutes = np.log(subset["travel_min"].values)
+        model = sm.GLM(log_minutes, design, family=sm.families.Gaussian())
+        result = model.fit()
+
+        sigma2 = float(result.scale)
+        residuals = log_minutes - result.fittedvalues
+
+        models[mode] = {
+            "sigma": float(np.sqrt(sigma2)),
+            "coefficients": {key: float(val) for key, val in result.params.items()},
+        }
+        metrics[mode] = {
+            "samples": int(len(subset)),
+            "sigma": float(np.sqrt(sigma2)),
+            "r_squared_log": float(
+                1
+                - np.sum((log_minutes - result.fittedvalues) ** 2)
+                / np.sum((log_minutes - log_minutes.mean()) ** 2)
+            ),
+            "mae_log": float(np.mean(np.abs(residuals))),
+        }
+
+    return models, metrics
 
 
 def main():
@@ -228,16 +259,18 @@ def main():
     bin_stats.to_parquet(stats_path, index=False)
     print(f"Wrote bin summaries to {stats_path}")
 
-    regression = {}
-    for mode in ["taxi", "bike"]:
-        try:
-            coeffs = fit_regression(combined, mode)
-            regression[mode] = coeffs
-        except ValueError as exc:
-            print(f"Skipping regression for {mode}: {exc}")
-    regr_path = args.output_dir / "travel_regression.json"
-    regr_path.write_text(json.dumps(regression, indent=2))
-    print(f"Wrote regression coefficients to {regr_path}")
+    lognormal_models, lognormal_metrics = fit_lognormal_glm(combined)
+    if lognormal_models:
+        lognormal_payload = {
+            "design_columns": ["const", "distance_km", "distance_sq", "is_rush", "is_weekend"],
+            "models": lognormal_models,
+            "metrics": lognormal_metrics,
+        }
+        lognormal_path = args.output_dir / "travel_lognormal_glm.json"
+        lognormal_path.write_text(json.dumps(lognormal_payload, indent=2))
+        print(f"Wrote lognormal GLM coefficients to {lognormal_path}")
+    else:
+        print("No lognormal GLM models were fit (insufficient samples).")
 
 
 if __name__ == "__main__":
