@@ -78,39 +78,25 @@ st.write("Compare travel times between taxi and Citi Bike using Jan 2024 data.")
 
 root = ROOT
 
-def load_taxi(max_rows=4000_000):
-    from modeling.poisson_zone import load_taxi_pickups
-    taxi_path = root / 'data/raw/yellow_tripdata_2024-01.parquet'
-    taxi = load_taxi_pickups(taxi_path, max_rows=max_rows)
-    taxi['hour'] = taxi['event_time'].dt.hour
-    rates = taxi.groupby(['PULocationID', 'hour']).size().rename('rides').reset_index()
-    rates['lambda_per_min'] = rates['rides'] / 60.0
-    centroids = pd.read_csv(root / 'data/raw/taxi_zone_centroids.csv')[['LocationID', 'lon', 'lat']]
-    centroids = centroids.rename(columns={'LocationID': 'PULocationID'})
+def load_taxi():
+    derived = root / 'data' / 'derived'
+    rates_path = derived / 'taxi_rates.parquet'
+    centroids_path = derived / 'taxi_centroids.parquet'
+    if not rates_path.exists() or not centroids_path.exists():
+        raise FileNotFoundError("Missing taxi derived files. Run scripts/component2_build_travel_stats.py or preprocessing scripts to generate data/derived/taxi_*.parquet.")
+    rates = pd.read_parquet(rates_path)
+    centroids = pd.read_parquet(centroids_path)
     return rates, centroids
 
-def load_bike(max_rows=500_000):
-    files = sorted((root / 'data/raw/citibike').glob('202401-citibike-tripdata_*.csv'))
-    if not files:
-        st.warning('No Citi Bike CSVs found.')
+def load_bike():
+    derived = root / 'data' / 'derived'
+    rates_path = derived / 'citibike_rates.parquet'
+    stations_path = derived / 'citibike_stations.parquet'
+    if not rates_path.exists() or not stations_path.exists():
+        st.warning("Missing Citi Bike derived files. Run preprocessing to generate data/derived/citibike_*.parquet.")
         return None, None
-    frames = []
-    for i, f in enumerate(files):
-        frames.append(pd.read_csv(
-            f,
-            nrows=max_rows if i == 0 else None,
-            dtype={'start_station_id': str, 'end_station_id': str},
-            low_memory=False,
-        ))
-    bike = pd.concat(frames, ignore_index=True)
-    bike['started_at'] = pd.to_datetime(bike['started_at'])
-    bike['hour'] = bike['started_at'].dt.hour
-    bike = bike.dropna(subset=['start_station_id', 'start_lat', 'start_lng'])
-    bike['start_station_id'] = bike['start_station_id'].astype(str)
-    rates = bike.groupby(['start_station_id', 'hour']).size().rename('rides').reset_index()
-    rates['lambda_per_min'] = rates['rides'] / 60.0
-    stations = bike[['start_station_id', 'start_lat', 'start_lng']].drop_duplicates()
-    stations = stations.rename(columns={'start_lat': 'lat', 'start_lng': 'lon'})
+    rates = pd.read_parquet(rates_path)
+    stations = pd.read_parquet(stations_path)
     return rates, stations
 
 @st.cache_data(show_spinner=False)
