@@ -1,149 +1,152 @@
-# NYC Public Transit Travel/Wait-Time Modeling
+# NYC Public Transit — Wait & Travel Time Modeling
 
-This repo contains the notebooks, preprocessing scripts, and Streamlit dashboard used to compare NYC taxi vs Citi Bike performance using Jan–Jun 2024 data. The work has two major threads:
+This project compares NYC Yellow Taxi and Citi Bike performance during Jan–Jun 2024.  We derive per-location wait estimates and end-to-end travel times, cache the parameters, and surface everything in a Streamlit dashboard plus a LaTeX report (`docs/report.tex`).  The modeling pipeline:
 
-1. **Wait-time modeling** – Poisson / Negative-Binomial fits for arrivals plus exponential wait-time diagnostics (`notebooks/mode_diagnostics.ipynb`, `src/modeling/wait_dashboard.py`).
-2. **Travel-time modeling** – Gamma-bin summaries and a continuous lognormal GLM fallback with an `is_ebike` knob for Citi Bike trips (`notebooks/mode_diagnostics.ipynb`, `scripts/build_travel_stats.py`, `src/modeling/travel_times.py`).
+- **Waits:** For every taxi zone and Citi Bike station we compute hourly arrival rates split by weekday/weekend and rush/non-rush.  Inter-arrival gaps follow an exponential curve, so we store one $\lambda$ per slice and expose the mean wait ($60 / \lambda$ minutes) in the app.
+- **Travel times:** Gamma cohorts (mode × 2 km distance bin × rush flag × weekend flag) are kept for diagnostics, while the deployed predictions come from a lognormal regression trained per mode:
+  \[
+  \log T = \beta_0 + \beta_1 d + \beta_2 d^2 + \beta_3 I_{\text{rush}} + \beta_4 I_{\text{weekend}} + \varepsilon.
+  \]
+  Bikes add an e-bike indicator.  Predictions apply $\exp(\hat{\mu} + 0.5 \hat{\sigma}^2)$ to recover minutes.
 
-The quick-start below explains how to set up the data, run the notebooks, and launch the dashboard.
-
----
-
-## 1. Requirements and environment setup
-
-- Python 3.11+ (project tested on a conda env named `nyc`)
-- Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Key packages: `numpy`, `pandas`, `scipy`, `statsmodels`, `plotly`, `kaleido` (for embedding static PNGs), `streamlit`, `folium`.
-
-Optional: install `nbclassic` / `jupyterlab` for running notebooks with `ipywidgets`.
+All derived parameters live under `data/derived/` and `outputs/`, so the Streamlit app never touches the raw TLC / Citi Bike files once caches are built.
 
 ---
 
-## 2. Data layout and downloads
+## 1. Environment & dependencies
+
+1. Python 3.11+ (the repo was tested with a conda env called `nyc`).
+2. Install packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   Key libs: `numpy`, `pandas`, `pyarrow`, `statsmodels`, `scipy`, `plotly`, `kaleido`, `streamlit`, `folium`.
+3. Optional: `jupyterlab`/`nbclassic` for notebooks with `ipywidgets`.
+
+---
+
+## 2. Data sources
 
 ```
 data/
 ├── raw/
 │   ├── yellow_tripdata_2024-01.parquet … yellow_tripdata_2024-06.parquet
 │   ├── citibike/
-│   │   ├── 202401-citibike-tripdata_1.csv … (Jan–Jun 2024 Citi Bike CSVs)
-│   ├── taxi_zone_lookup.csv, taxi_zone_centroids.csv, taxi_zones_shp/ …
-├── derived/
-│   ├── taxi_rates.parquet, taxi_centroids.parquet
-│   ├── citibike_rates.parquet, citibike_stations.parquet
-│   └── travel_stats/
-│       ├── travel_bins.parquet
-│       ├── travel_lognormal_glm.json
-│       └── (legacy) travel_regression.json
+│   │   ├── 202401-citibike-tripdata_1.csv … 202406-citibike-tripdata_1.csv
+│   ├── taxi_zone_lookup.csv
+│   ├── taxi_zone_centroids.csv
+│   └── taxi_zones_shp/…
+└── derived/  (filled by the scripts in §3)
 ```
 
-### Taxi data
-- Download monthly Yellow Taxi Parquet files from the NYC TLC repository: https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
-- Place the Jan–Jun 2024 files under `data/raw/` with the names shown above.
+- **Yellow Taxi trips:** TLC monthly parquet files — <https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page>
+- **Citi Bike trips:** Monthly CSVs — <https://s3.amazonaws.com/tripdata/index.html>
+- **Zone metadata:** TLC data dictionary (lookup table, centroids, shapefile)
 
-### Citi Bike data
-- Download monthly Citi Bike trip CSVs from: https://s3.amazonaws.com/tripdata/index.html
-- Extract them under `data/raw/citibike/`. The script/notebooks expect filenames like `202401-citibike-tripdata_1.csv`.
-
-### Taxi zone metadata
-- `taxi_zone_lookup.csv`, `taxi_zone_centroids.csv`, and `taxi_zones_shp/` come from the TLC GitHub data dictionary.
+Drop the Jan–Jun 2024 files into `data/raw/` as shown above.
 
 ---
 
-## 3. Precompute derived artifacts
+## 3. Build the caches
 
-Several files in `data/derived/` are required by the notebooks and the Streamlit app. They are produced by dedicated scripts/notebooks:
+The Streamlit app requires summarized artifacts.  Run the following after downloading the raw data.
 
-1. **Taxi/Citi Bike station summaries (wait model)** – follow the preprocessing steps defined in the wait-time notebooks or run `python scripts/build_wait_stats.py` (add `--taxi-paths data/raw/yellow_tripdata_2024-*.parquet` to span multiple months) to generate:
-   - `data/derived/taxi_rates.parquet`
-   - `data/derived/taxi_centroids.parquet`
-   - `data/derived/citibike_rates.parquet`
-   - `data/derived/citibike_stations.parquet`
+### 3.1 Wait-time summaries
 
-2. **Travel-time stats (lognormal + Gamma)** – run the builder script:
+```
+python scripts/build_wait_stats.py \
+  --cache-dir outputs/wait_stats \
+  --taxi-paths data/raw/yellow_tripdata_2024-0{1,2,3,4,5,6}.parquet
+```
 
-```bash
+Arguments are optional—by default the script scans `data/raw/yellow_tripdata_2024-*.parquet` and `data/raw/citibike/2024*-citibike-tripdata_*.csv`.  Outputs (default `outputs/wait_stats/`):
+- `taxi_hourly_waits.parquet` (`.json`) – per-zone hourly $\lambda_{z,h}$ with weekday/weekend & rush labels
+- `bike_hourly_waits.parquet` (`.json`)
+- `citibike_stations.parquet`
+- companion JSON exports for the Streamlit app
+
+### 3.2 Travel-time stats
+
+```
 python scripts/build_travel_stats.py \
   --bike-root data/raw/citibike \
-  --bike-glob '202401-citibike-tripdata_*.csv' \
+  --bike-glob '20240*-citibike-tripdata_*.csv' \
   --output-dir data/derived/travel_stats
 ```
 
-This produces:
-- `travel_bins.parquet` (Gamma fits per mode/distance bin/rush/weekend)
-- `travel_lognormal_glm.json` (continuous GLM coefficients/metrics)
-
-The Streamlit app now reads stats from `data/derived/travel_stats` by default.
+Produces:
+- `travel_bins.parquet` – Gamma cohorts (diagnostics only)
+- `travel_lognormal_glm.json` – regression coefficients, $\sigma$, fit metrics
 
 ---
 
-## 4. Running the notebooks
+## 4. Notebooks
 
-Launch JupyterLab or Notebook from the repo root (ensure the conda env is activated and `ipywidgets` is installed).
+- `notebooks/mode_diagnostics.ipynb` — unified exploration of wait histograms, travel cohorts, and lognormal fits.  Exports PNG snapshots via `plotly.io.write_image` so reviewers see figures on GitHub.
+- `notebooks/data_overview.ipynb` — dataset sanity checks.
+- `notebooks/travel_lognormal_cohorts.ipynb` — scratchpad for the regression design matrix and comparisons.
 
-### `notebooks/mode_diagnostics.ipynb`
-- Unified notebook that embeds both wait-time and travel-time dashboards.
-- Relies on the shared helpers in `src/modeling/wait_dashboard.py` and `src/modeling/travel_diagnostics.py`.
-- Exports representative PNG snapshots (using `kaleido`) alongside ipywidgets so GitHub/nbviewer readers can see reference figures without executing the notebook.
-- Includes a configuration cell (`WAIT_TAXI_MAX_ROWS`, etc.) so you can downsample raw data when running on smaller machines.
-- Legacy `wait_times.ipynb` / `travel_times.ipynb` now just point to this combined notebook to avoid duplication.
-- Does **not** require the derived Gamma/GLM caches; those are only needed for the Streamlit deployment path.
-- For quick dataset stats (trip counts, average duration/distance, station/zone coverage), run `notebooks/data_overview.ipynb`.
-
-**Tip:** Execute the “Static … snapshot” cells before committing so fresh PNGs are embedded for reviewers.
+Run notebooks from the repo root (so relative paths resolve) with your environment activated.  Execute the “Static snapshot” cells before committing to refresh the PNGs in `docs/figures/`.
 
 ---
 
-## 5. Deployment flow & Streamlit
+## 5. Streamlit dashboard
 
-1. **Notebook exploration** – run `notebooks/mode_diagnostics.ipynb` against raw data (downsample if needed); tune thresholds, study diagnostics, etc.
-2. **Persist wait-time stats** – run `python scripts/build_wait_stats.py` to write `outputs/wait_stats/*` (Poisson/NB + wait summaries) for both taxi zones and Citi Bike stations.
-3. **Persist travel-time stats** – run:
+Launch locally once caches exist:
 
-   ```bash
-   python scripts/build_travel_stats.py \
-     --bike-root data/raw/citibike \
-     --bike-glob '20240*-citibike-tripdata_*.csv' \
-     --output-dir data/derived/travel_stats
-   ```
+```bash
+streamlit run streamlit_app.py
+```
 
-   This writes `travel_bins.parquet` and `travel_lognormal_glm.json` consumed by `src/modeling/travel_times.py`.
+The app:
+1. Loads taxi / Citi Bike wait summaries and lognormal parameters from `data/derived/`.
+2. Lets users drop origin/destination pins or search addresses.
+3. Computes walk + wait + travel time for both modes and surfaces the faster option.
+4. Falls back to nearest stations/zones if a cohort is missing data.
 
-4. **Launch the dashboard**:
-
-   ```bash
-   streamlit run streamlit_app.py
-   ```
-
-   The app loads the cached wait/travel stats and compares taxi vs bike without touching the raw files. If a cache is missing, rerun the corresponding builder script.
+Deployment notes:
+- `streamlit_app.py` references environment variables for Mapbox keys if you want custom tiles.
+- `outputs/` can store JSON exports (`wait_cache.json`, `travel_cache.json`) to decouple the app from Parquet.
 
 ---
 
-## 6. Repository structure quick reference
+## 6. Repo layout
 
 ```
-scripts/build_wait_stats.py               # builds Poisson/wait caches for taxi + Citi Bike
-scripts/build_travel_stats.py             # builds Gamma + lognormal stats
-src/modeling/                             # helpers for Streamlit + modeling
-notebooks/                                # analysis notebooks with embedded figures
-streamlit_app.py                          # dashboard entry point
-data/raw                                  # source datasets
-data/derived                              # precomputed artifacts used in app/notebooks
+docs/                # report.tex + compiled PDF and published figures
+notebooks/           # Jupyter analyses with cached PNGs
+scripts/
+  build_wait_stats.py
+  build_travel_stats.py
+src/
+  modeling/
+    wait_dashboard.py
+    travel_diagnostics.py
+    travel_times.py
+streamlit_app.py
 ```
 
 ---
 
 ## 7. Troubleshooting
 
-- **`Path.cwd()` FileNotFoundError inside notebooks** – restart the kernel or set `PROJECT_ROOT` explicitly if you opened the notebook from a different directory.
-- **Interactive widgets not showing figures on GitHub** – re-run the static snapshot cells; they export PNGs inline.
-- **Streamlit travel-time errors** – ensure `data/derived/travel_stats/travel_lognormal_glm.json` exists (run the builder script).
+- **Missing `kaleido` when saving PNGs** — `pip install kaleido`.
+- **Streamlit cannot find stats** — rerun the scripts in §3; check that `data/derived/travel_stats/travel_lognormal_glm.json` exists.
+- **Large parquet loads** — use the down-sampling knobs at the top of the notebooks (`MAX_TRIPS`, etc.).
 
 ---
 
-With the raw data downloaded and the `build_wait_stats.py` + `build_travel_stats.py` scripts executed, you can explore the notebook and launch the Streamlit dashboard without additional setup. Happy modeling!
+## 8. Reproducing the report
+
+`docs/report.tex` mirrors the README narrative (wait-method, travel-method, Streamlit).  To rebuild the PDF:
+
+```
+cd docs
+pdflatex report.tex
+```
+
+The repo already contains figures (`docs/figures/*.png`) exported from the diagnostics notebook.
+
+---
+
+Questions or suggestions?  File an issue or ping the authors via the GitHub repo: <https://github.com/AtharvRN/NYC_Public_Transit>.
