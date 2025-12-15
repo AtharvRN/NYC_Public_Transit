@@ -15,11 +15,7 @@ nyc/
 /data/raw/
 /outputs/
 /notebooks/.ipynb_checkpoints/
-/docs/Gender_diversity.pdf
-/docs/H1B_Visa_Approval_Analysis_Prediction.pdf
-/docs/Product_Rating.pdf
-/docs/Predictive_Maintenance.pdf
-
+/docs/
 # LaTeX build artifacts
 *.aux
 *.log

@@ -50,7 +50,12 @@ def build_wait_lookup(df):
         return {}
     lookup = {}
     for row in df.itertuples(index=False):
-        key = (row.location_id, int(row.hour))
+        key = (
+            row.location_id,
+            int(row.hour),
+            bool(getattr(row, "is_weekend", False)),
+            bool(getattr(row, "is_rush", False)),
+        )
         lookup[key] = {
             'mean_wait': float(row.mean_wait) if pd.notna(row.mean_wait) else np.nan,
             'poisson_wait': float(row.poisson_wait) if pd.notna(row.poisson_wait) else np.nan,
@@ -58,13 +63,72 @@ def build_wait_lookup(df):
         }
     return lookup
 
-def pick_wait_minutes(lookup, location_id, hour, fallback=np.nan, min_samples=5):
-    stats = lookup.get((location_id, int(hour)))
+def build_coord_lookup(df, *, id_candidates, lat_candidates=('lat', 'latitude'), lon_candidates=('lon', 'longitude', 'lng')):
+    if df is None:
+        return {}
+    id_col = next((c for c in id_candidates if c in df.columns), None)
+    lat_col = next((c for c in lat_candidates if c in df.columns), None)
+    lon_col = next((c for c in lon_candidates if c in df.columns), None)
+    if not id_col or not lat_col or not lon_col:
+        return {}
+    valid = df.dropna(subset=[id_col, lat_col, lon_col])
+    coord = {}
+    for row in valid.itertuples(index=False):
+        record = row._asdict()
+        coord[record[id_col]] = (float(record[lat_col]), float(record[lon_col]))
+    return coord
+
+def _nearest_wait_minutes(lookup, coord_lookup, location_id, hour, is_weekend, is_rush, min_samples):
+    target = coord_lookup.get(location_id)
+    if not target:
+        return np.nan
+    lat0, lon0 = target
+    best_wait = np.nan
+    best_dist = float('inf')
+    for (loc, h, wknd, rush), stats in lookup.items():
+        if h != int(hour) or wknd != bool(is_weekend) or rush != bool(is_rush):
+            continue
+        if stats.get('wait_count', 0) < min_samples or not np.isfinite(stats.get('mean_wait')):
+            continue
+        coords = coord_lookup.get(loc)
+        if not coords:
+            continue
+        lat1, lon1 = coords
+        dist = haversine_km(lat0, lon0, lat1, lon1)
+        if dist < best_dist:
+            best_dist = dist
+            best_wait = stats['mean_wait']
+    return best_wait
+
+def pick_wait_minutes(
+    lookup,
+    location_id,
+    hour,
+    *,
+    is_weekend: bool,
+    is_rush: bool,
+    fallback=np.nan,
+    min_samples=5,
+    coord_lookup=None,
+):
+    stats = lookup.get((location_id, int(hour), bool(is_weekend), bool(is_rush)))
     if stats:
         if np.isfinite(stats.get('mean_wait')) and stats.get('wait_count', 0) >= min_samples:
             return stats['mean_wait']
         if np.isfinite(stats.get('poisson_wait')):
             return stats['poisson_wait']
+    if coord_lookup:
+        neighbor = _nearest_wait_minutes(
+            lookup,
+            coord_lookup,
+            location_id,
+            hour,
+            is_weekend,
+            is_rush,
+            min_samples,
+        )
+        if np.isfinite(neighbor):
+            return neighbor
     return fallback
 
 def is_rush_hour(hour):
@@ -83,7 +147,7 @@ def load_taxi():
     rates_path = derived / 'taxi_rates.parquet'
     centroids_path = derived / 'taxi_centroids.parquet'
     if not rates_path.exists() or not centroids_path.exists():
-        raise FileNotFoundError("Missing taxi derived files. Run scripts/component2_build_travel_stats.py or preprocessing scripts to generate data/derived/taxi_*.parquet.")
+        raise FileNotFoundError("Missing taxi derived files. Run scripts/build_travel_stats.py or preprocessing scripts to generate data/derived/taxi_*.parquet.")
     rates = pd.read_parquet(rates_path)
     centroids = pd.read_parquet(centroids_path)
     return rates, centroids
@@ -125,6 +189,20 @@ with st.spinner("Loading wait-time summaries..."):
     bike_wait_df = _safe_wait_stats('bike')
 taxi_wait_lookup = build_wait_lookup(taxi_wait_df)
 bike_wait_lookup = build_wait_lookup(bike_wait_df)
+taxi_coord_lookup = build_coord_lookup(centroids, id_candidates=('LocationID', 'location_id'))
+bike_coord_lookup = build_coord_lookup(
+    stations,
+    id_candidates=('catchment_id', 'start_station_id', 'StationID'),
+    lat_candidates=('catchment_lat', 'lat', 'latitude'),
+    lon_candidates=('catchment_lon', 'lon', 'longitude', 'lng'),
+)
+
+station_lookup = None
+if stations is not None and not stations.empty and 'start_station_id' in stations.columns:
+    station_lookup = (
+        stations.drop_duplicates(subset='start_station_id')
+        .set_index('start_station_id')
+    )
 
 def safe_travel_estimate(mode, distance_km, is_rush, is_weekend, fallback_speed):
     try:
@@ -209,6 +287,35 @@ if st_folium is None or folium is None:
     st.error('Please install: pip install streamlit-folium folium')
     st.stop()
 
+# Pre-compute nearest bike stations for visualization/calcs
+bike_start = None
+bike_end = None
+if stations is not None and not stations.empty:
+    start_id, start_lat, start_lon, start_dist = nearest_point(
+        stations, st.session_state["origin_lat"], st.session_state["origin_lon"], "start_station_id"
+    )
+    end_id, end_lat, end_lon, end_dist = nearest_point(
+        stations, st.session_state["dest_lat"], st.session_state["dest_lon"], "start_station_id"
+    )
+    start_meta = station_lookup.loc[start_id] if station_lookup is not None and start_id in station_lookup.index else None
+    end_meta = station_lookup.loc[end_id] if station_lookup is not None and end_id in station_lookup.index else None
+    start_catchment = start_meta.get('catchment_id') if start_meta is not None else None
+    end_catchment = end_meta.get('catchment_id') if end_meta is not None else None
+    bike_start = {
+        "id": start_id,
+        "catchment_id": start_catchment if isinstance(start_catchment, str) else start_id,
+        "lat": start_lat,
+        "lon": start_lon,
+        "distance_km": start_dist,
+    }
+    bike_end = {
+        "id": end_id,
+        "catchment_id": end_catchment if isinstance(end_catchment, str) else end_id,
+        "lat": end_lat,
+        "lon": end_lon,
+        "distance_km": end_dist,
+    }
+
 # Build map
 center_lat = (st.session_state['origin_lat'] + st.session_state['dest_lat']) / 2
 center_lon = (st.session_state['origin_lon'] + st.session_state['dest_lon']) / 2
@@ -239,34 +346,45 @@ folium.PolyLine(
     opacity=0.7
 ).add_to(fmap)
 
-# Add taxi zones (light background)
-taxi_group = folium.FeatureGroup(name='Taxi Zones')
-for _, r in centroids.iterrows():
-        folium.CircleMarker(
-            location=[r.lat, r.lon],
-            radius=2,
-            color='orange',
-            fill=True,
-            fill_opacity=0.25,
-            tooltip=f"Taxi Zone {int(r.PULocationID)}",
-            popup=f"Zone ID: {int(r.PULocationID)}"
-        ).add_to(taxi_group)
-taxi_group.add_to(fmap)
+# Highlight nearest bike stations and segments
+if bike_start:
+    folium.Marker(
+        location=[bike_start["lat"], bike_start["lon"]],
+        popup=f"Bike start station {bike_start['id']}",
+        icon=folium.Icon(color='blue', icon='bicycle', prefix='fa')
+    ).add_to(fmap)
+    folium.PolyLine(
+        locations=[[st.session_state['origin_lat'], st.session_state['origin_lon']],
+                   [bike_start["lat"], bike_start["lon"]]],
+        color='gray',
+        weight=2,
+        opacity=0.8,
+        dash_array='5,5'
+    ).add_to(fmap)
 
-# Add bike stations (light background)
-if stations is not None and not stations.empty:
-    bike_group = folium.FeatureGroup(name='Bike Stations')
-    for _, r in stations.iterrows():
-        folium.CircleMarker(
-            location=[r.lat, r.lon],
-            radius=2,
-            color='dodgerblue',
-            fill=True,
-            fill_opacity=0.35,
-            tooltip=f"Station {r.start_station_id}",
-            popup=f"Station ID: {r.start_station_id}"
-        ).add_to(bike_group)
-    bike_group.add_to(fmap)
+if bike_end:
+    folium.Marker(
+        location=[bike_end["lat"], bike_end["lon"]],
+        popup=f"Bike end station {bike_end['id']}",
+        icon=folium.Icon(color='purple', icon='flag-checkered', prefix='fa')
+    ).add_to(fmap)
+    folium.PolyLine(
+        locations=[[bike_end["lat"], bike_end["lon"]],
+                   [st.session_state['dest_lat'], st.session_state['dest_lon']]],
+        color='gray',
+        weight=2,
+        opacity=0.8,
+        dash_array='5,5'
+    ).add_to(fmap)
+
+if bike_start and bike_end:
+    folium.PolyLine(
+        locations=[[bike_start["lat"], bike_start["lon"]],
+                   [bike_end["lat"], bike_end["lon"]]],
+        color='dodgerblue',
+        weight=3,
+        opacity=0.8
+    ).add_to(fmap)
 
 folium.LayerControl().add_to(fmap)
 
@@ -317,50 +435,80 @@ st.info(f"📏 Direct distance: **{direct_km:.2f} km**")
 
 # Calculate for both modes
 results = []
+walk_to_start_min = None
+walk_to_dest_min = None
+ride_km = None
+wait_bike = None
 
 # TAXI
-tz_id, tz_lat, tz_lon, tz_walk_km = nearest_point(centroids, *origin, 'PULocationID')
+tz_id, tz_lat, tz_lon, _ = nearest_point(centroids, *origin, 'PULocationID')
 lam_taxi = get_lambda(taxi_rates, 'PULocationID', tz_id, hour=hour)
 fallback_taxi = np.nan if not np.isfinite(lam_taxi) or lam_taxi <= 0 else 1 / lam_taxi
-wait_taxi = pick_wait_minutes(taxi_wait_lookup, tz_id, hour, fallback=fallback_taxi)
-walk_taxi_min = (tz_walk_km / WALK_SPEED_KMH) * 60
+wait_taxi = pick_wait_minutes(
+    taxi_wait_lookup,
+    tz_id,
+    hour,
+    is_weekend=is_weekend_choice,
+    is_rush=rush_flag,
+    fallback=fallback_taxi,
+    coord_lookup=taxi_coord_lookup,
+)
 travel_taxi_est = safe_travel_estimate('taxi', direct_km, rush_flag, is_weekend_choice, TAXI_SPEED_KMH)
 travel_taxi_min = travel_taxi_est.minutes
-total_taxi = wait_taxi + walk_taxi_min + travel_taxi_min if np.isfinite(wait_taxi) else np.nan
+total_taxi = wait_taxi + travel_taxi_min if np.isfinite(wait_taxi) else np.nan
 
 results.append({
     'Mode': '🚕 Taxi',
     'Wait (min)': f"{wait_taxi:.1f}" if np.isfinite(wait_taxi) else "N/A",
-    'Walk (min)': f"{walk_taxi_min:.1f}",
-    'Travel (min)': f"{travel_taxi_min:.1f}",
+    'Walk to station (min)': "0.0",
+    'Ride/Bike (min)': f"{travel_taxi_min:.1f}",
+    'Walk to destination (min)': "0.0",
     'Total (min)': f"{total_taxi:.1f}" if np.isfinite(total_taxi) else "N/A",
     'total_numeric': total_taxi
 })
 
 # BIKE
-if bike_rates is not None and stations is not None and not stations.empty:
-    st_id, st_lat, st_lon, st_walk_km = nearest_point(stations, *origin, 'start_station_id')
-    lam_bike = get_lambda(bike_rates, 'start_station_id', st_id, hour=hour)
+if bike_rates is not None and bike_start and bike_end:
+    lam_bike = get_lambda(bike_rates, 'start_station_id', bike_start['id'], hour=hour)
     fallback_bike = np.nan if not np.isfinite(lam_bike) or lam_bike <= 0 else 1 / lam_bike
-    wait_bike = pick_wait_minutes(bike_wait_lookup, st_id, hour, fallback=fallback_bike)
-    walk_bike_min = (st_walk_km / WALK_SPEED_KMH) * 60
-    travel_bike_est = safe_travel_estimate('bike', direct_km, rush_flag, is_weekend_choice, BIKE_SPEED_KMH)
+    wait_bike = pick_wait_minutes(
+        bike_wait_lookup,
+        bike_start['catchment_id'],
+        hour,
+        is_weekend=is_weekend_choice,
+        is_rush=rush_flag,
+        fallback=fallback_bike,
+        coord_lookup=bike_coord_lookup,
+    )
+    walk_to_start_min = (bike_start['distance_km'] / WALK_SPEED_KMH) * 60
+    walk_to_dest_min = (bike_end['distance_km'] / WALK_SPEED_KMH) * 60
+    ride_km = haversine_km(bike_start['lat'], bike_start['lon'], bike_end['lat'], bike_end['lon'])
+    ride_km = max(0.1, ride_km)
+    travel_bike_est = safe_travel_estimate('bike', ride_km, rush_flag, is_weekend_choice, BIKE_SPEED_KMH)
     travel_bike_min = travel_bike_est.minutes
-    total_bike = wait_bike + walk_bike_min + travel_bike_min if np.isfinite(wait_bike) else np.nan
+    total_bike = wait_bike + walk_to_start_min + travel_bike_min + walk_to_dest_min if np.isfinite(wait_bike) else np.nan
     
     results.append({
         'Mode': '🚲 Citi Bike',
         'Wait (min)': f"{wait_bike:.1f}" if np.isfinite(wait_bike) else "N/A",
-        'Walk (min)': f"{walk_bike_min:.1f}",
-        'Travel (min)': f"{travel_bike_min:.1f}",
+        'Walk to station (min)': f"{walk_to_start_min:.1f}",
+        'Ride/Bike (min)': f"{travel_bike_min:.1f}",
+        'Walk to destination (min)': f"{walk_to_dest_min:.1f}",
         'Total (min)': f"{total_bike:.1f}" if np.isfinite(total_bike) else "N/A",
         'total_numeric': total_bike
     })
 
 # Display results
 result_df = pd.DataFrame(results)
-st.dataframe(result_df[['Mode', 'Wait (min)', 'Walk (min)', 'Travel (min)', 'Total (min)']], 
-             width='stretch', hide_index=True)
+cols_to_show = [
+    'Mode',
+    'Wait (min)',
+    'Walk to station (min)',
+    'Ride/Bike (min)',
+    'Walk to destination (min)',
+    'Total (min)',
+]
+st.dataframe(result_df[cols_to_show], width='stretch', hide_index=True)
 
 # Bar chart
 valid_results = result_df[result_df['total_numeric'].notna()]
@@ -390,18 +538,25 @@ else:
 
 # Additional info
 with st.expander("ℹ️ Calculation Details"):
-    st.markdown(f"""
+    taxi_md = f"""
     **Taxi (Zone {tz_id}):**
-    - Walk to nearest taxi zone: {tz_walk_km:.3f} km ({walk_taxi_min:.1f} min)
     - Wait for taxi: {wait_taxi:.1f} min
-    - Travel distance: {direct_km:.2f} km
-    
-    **Citi Bike (Station {st_id if 'st_id' in locals() else 'N/A'}):**
-    - Walk to nearest bike station: {(st_walk_km if 'st_walk_km' in locals() else 0):.3f} km ({(walk_bike_min if 'walk_bike_min' in locals() else 0):.1f} min)
-    - Wait for bike: {(wait_bike if 'wait_bike' in locals() else 0):.1f} min
-    - Travel distance: {direct_km:.2f} km
-    
-    *Wait times estimated from Jan 2024 historical data at hour {hour}:00*
-    """)
+    - Door-to-door ride distance: {direct_km:.2f} km
+    """
+    st.markdown(taxi_md)
+
+    if bike_start and bike_end and wait_bike is not None:
+        bike_md = f"""
+        **Citi Bike:**
+        - Walk to start station {bike_start['id']}: {bike_start['distance_km']:.3f} km ({walk_to_start_min:.1f} min)
+        - Wait for bike: {wait_bike:.1f} min
+        - Bike ride between stations: {ride_km:.2f} km
+        - Walk from station {bike_end['id']} to destination: {bike_end['distance_km']:.3f} km ({walk_to_dest_min:.1f} min)
+        """
+        st.markdown(bike_md)
+    else:
+        st.markdown("**Citi Bike:** station data unavailable for this location.")
+
+    st.caption(f"*Wait times estimated using historical data at {hour}:00*")
 
 st.caption("💡 Click the green/red buttons above to change origin/destination on the map. Analysis updates automatically.")

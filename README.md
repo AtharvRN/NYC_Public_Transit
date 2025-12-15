@@ -1,9 +1,9 @@
 # NYC Public Transit Travel/Wait-Time Modeling
 
-This repo contains the notebooks, preprocessing scripts, and Streamlit dashboard used to compare NYC taxi vs Citi Bike performance using Jan–Jun 2024 data. The project is split into two components:
+This repo contains the notebooks, preprocessing scripts, and Streamlit dashboard used to compare NYC taxi vs Citi Bike performance using Jan–Jun 2024 data. The work has two major threads:
 
-1. **Wait-time modeling (Component 1)** – Poisson / Negative-Binomial fits for arrivals plus exponential wait-time diagnostics (`notebooks/wait_times.ipynb`).
-2. **Travel-time modeling (Component 2)** – Gamma-bin summaries and a continuous lognormal GLM fallback (`notebooks/travel_times.ipynb`, `scripts/component2_build_travel_stats.py`, `src/modeling/travel_times.py`).
+1. **Wait-time modeling** – Poisson / Negative-Binomial fits for arrivals plus exponential wait-time diagnostics (`notebooks/mode_diagnostics.ipynb`, `src/modeling/wait_dashboard.py`).
+2. **Travel-time modeling** – Gamma-bin summaries and a continuous lognormal GLM fallback with an `is_ebike` knob for Citi Bike trips (`notebooks/mode_diagnostics.ipynb`, `scripts/build_travel_stats.py`, `src/modeling/travel_times.py`).
 
 The quick-start below explains how to set up the data, run the notebooks, and launch the dashboard.
 
@@ -59,7 +59,7 @@ data/
 
 Several files in `data/derived/` are required by the notebooks and the Streamlit app. They are produced by dedicated scripts/notebooks:
 
-1. **Taxi/Citi Bike station summaries (wait model)** – follow the preprocessing steps defined in Component 1 notebooks or custom scripts to generate:
+1. **Taxi/Citi Bike station summaries (wait model)** – follow the preprocessing steps defined in the wait-time notebooks or run `python scripts/build_wait_stats.py` (add `--taxi-paths data/raw/yellow_tripdata_2024-*.parquet` to span multiple months) to generate:
    - `data/derived/taxi_rates.parquet`
    - `data/derived/taxi_centroids.parquet`
    - `data/derived/citibike_rates.parquet`
@@ -68,8 +68,7 @@ Several files in `data/derived/` are required by the notebooks and the Streamlit
 2. **Travel-time stats (lognormal + Gamma)** – run the builder script:
 
 ```bash
-python scripts/component2_build_travel_stats.py \
-  --taxi-path data/raw/yellow_tripdata_2024-01.parquet \
+python scripts/build_travel_stats.py \
   --bike-root data/raw/citibike \
   --bike-glob '202401-citibike-tripdata_*.csv' \
   --output-dir data/derived/travel_stats
@@ -87,42 +86,49 @@ The Streamlit app now reads stats from `data/derived/travel_stats` by default.
 
 Launch JupyterLab or Notebook from the repo root (ensure the conda env is activated and `ipywidgets` is installed).
 
-### `notebooks/wait_times.ipynb`
-- Demonstrates why Poisson/Negative-Binomial arrivals and exponential wait times are reasonable.
-- Requires `data/raw` taxi/citi data and derived wait-time rate files.
-- Contains interactive widgets plus static PNGs (rendered via `kaleido`) so GitHub viewers can see the figures.
+### `notebooks/mode_diagnostics.ipynb`
+- Unified notebook that embeds both wait-time and travel-time dashboards.
+- Relies on the shared helpers in `src/modeling/wait_dashboard.py` and `src/modeling/travel_diagnostics.py`.
+- Exports representative PNG snapshots (using `kaleido`) alongside ipywidgets so GitHub/nbviewer readers can see reference figures without executing the notebook.
+- Includes a configuration cell (`WAIT_TAXI_MAX_ROWS`, etc.) so you can downsample raw data when running on smaller machines.
+- Legacy `wait_times.ipynb` / `travel_times.ipynb` now just point to this combined notebook to avoid duplication.
+- Does **not** require the derived Gamma/GLM caches; those are only needed for the Streamlit deployment path.
+- For quick dataset stats (trip counts, average duration/distance, station/zone coverage), run `notebooks/data_overview.ipynb`.
 
-### `notebooks/travel_times.ipynb`
-- Mirrors the wait-time analysis for travel-time fits: Gamma bins vs lognormal GLM, MAE/RMSE comparisons, log-likelihood tables, etc.
-- Pulls helper functions directly from `scripts/component2_build_travel_stats.py`.
-- Run the entire notebook to refresh metrics and embedded figures before committing.
-
-**Tip:** Execute the new “Static … snapshot” cells to embed PNG outputs; otherwise GitHub will only show the ipywidget placeholders.
+**Tip:** Execute the “Static … snapshot” cells before committing so fresh PNGs are embedded for reviewers.
 
 ---
 
-## 5. Running the Streamlit dashboard
+## 5. Deployment flow & Streamlit
 
-1. Make sure derived artifacts exist (see section 3).
-2. Start the app from the repo root:
+1. **Notebook exploration** – run `notebooks/mode_diagnostics.ipynb` against raw data (downsample if needed); tune thresholds, study diagnostics, etc.
+2. **Persist wait-time stats** – run `python scripts/build_wait_stats.py` to write `outputs/wait_stats/*` (Poisson/NB + wait summaries) for both taxi zones and Citi Bike stations.
+3. **Persist travel-time stats** – run:
 
-```bash
-streamlit run streamlit_app.py
-```
+   ```bash
+   python scripts/build_travel_stats.py \
+     --bike-root data/raw/citibike \
+     --bike-glob '20240*-citibike-tripdata_*.csv' \
+     --output-dir data/derived/travel_stats
+   ```
 
-The app:
-- Loads wait-time caches (`taxi_rates.parquet`, etc.) from `data/derived/`.
-- Uses `src/modeling/travel_times.py` to estimate travel minutes via the lognormal GLM (falls back to Gamma bins or constant speed if needed).
-- Lets users pick origin/destination on the map and compares taxi vs bike travel + wait times.
+   This writes `travel_bins.parquet` and `travel_lognormal_glm.json` consumed by `src/modeling/travel_times.py`.
 
-If the app displays “Travel stats missing…”, rerun the builder script to regenerate `data/derived/travel_stats/*`.
+4. **Launch the dashboard**:
+
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+
+   The app loads the cached wait/travel stats and compares taxi vs bike without touching the raw files. If a cache is missing, rerun the corresponding builder script.
 
 ---
 
 ## 6. Repository structure quick reference
 
 ```
-scripts/component2_build_travel_stats.py   # builds Gamma + lognormal stats
+scripts/build_wait_stats.py               # builds Poisson/wait caches for taxi + Citi Bike
+scripts/build_travel_stats.py             # builds Gamma + lognormal stats
 src/modeling/                             # helpers for Streamlit + modeling
 notebooks/                                # analysis notebooks with embedded figures
 streamlit_app.py                          # dashboard entry point
@@ -140,4 +146,4 @@ data/derived                              # precomputed artifacts used in app/no
 
 ---
 
-With the raw data downloaded and `scripts/component2_build_travel_stats.py` executed, you can explore both notebooks and launch the Streamlit dashboard without additional setup. Happy modeling!
+With the raw data downloaded and the `build_wait_stats.py` + `build_travel_stats.py` scripts executed, you can explore the notebook and launch the Streamlit dashboard without additional setup. Happy modeling!
