@@ -40,7 +40,7 @@ REGRESSION_MIN_SAMPLES = 200
 RUSH_HOURS = ((7, 10), (16, 19))
 
 
-def is_rush_hour(hour: int) -> bool:
+def is_rush_hour(hour):
     return any(start <= hour < end for start, end in RUSH_HOURS)
 
 
@@ -55,13 +55,13 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return r * c
 
 
-def assign_bins(dist_km: pd.Series) -> pd.Series:
+def assign_bins(dist_km):
     bins = np.arange(0, MAX_DISTANCE_KM + BIN_WIDTH_KM, BIN_WIDTH_KM)
     labels = [f"{bins[i]:.0f}-{bins[i+1]:.0f}km" for i in range(len(bins) - 1)]
     return pd.cut(dist_km, bins=bins, labels=labels, right=False)
 
 
-def prep_common_features(df: pd.DataFrame, event_col: str) -> pd.DataFrame:
+def prep_common_features(df, event_col):
     df = df.copy()
 
     df["event_time"] = pd.to_datetime(df[event_col])
@@ -79,7 +79,7 @@ def prep_common_features(df: pd.DataFrame, event_col: str) -> pd.DataFrame:
     return df.dropna(subset=["distance_bin"])
 
 
-def load_taxi_trips(path: Path, max_rows: Optional[int]) -> pd.DataFrame:
+def load_taxi_trips(path, max_rows):
     cols = [
         "tpep_pickup_datetime",
         "tpep_dropoff_datetime",
@@ -101,7 +101,7 @@ def load_taxi_trips(path: Path, max_rows: Optional[int]) -> pd.DataFrame:
     return df
 
 
-def load_bike_trips(root: Path, glob_pattern: str, max_rows: Optional[int]) -> pd.DataFrame:
+def load_bike_trips(root, glob_pattern, max_rows):
     files = sorted(root.glob(glob_pattern))
     if not files:
         raise FileNotFoundError(f"No Citi Bike files under {root} matching {glob_pattern}")
@@ -141,7 +141,7 @@ def load_bike_trips(root: Path, glob_pattern: str, max_rows: Optional[int]) -> p
     return df
 
 
-def fit_gamma(mean_val: float, var_val: float) -> Tuple[float, float]:
+def fit_gamma(mean_val, var_val):
     if mean_val <= 0 or var_val <= 0:
         return np.nan, np.nan
     k = (mean_val ** 2) / var_val
@@ -149,7 +149,7 @@ def fit_gamma(mean_val: float, var_val: float) -> Tuple[float, float]:
     return float(k), float(theta)
 
 
-def summarize_bins(df: pd.DataFrame) -> pd.DataFrame:
+def summarize_bins(df):
     grouped = (
         df.groupby(["mode", "distance_bin", "is_rush", "is_weekend"])["travel_min"]
         .agg(
@@ -171,7 +171,7 @@ def summarize_bins(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def build_lognormal_design(df: pd.DataFrame) -> pd.DataFrame:
+def build_lognormal_design(df):
     design = pd.DataFrame(
         {
             "distance_km": df["distance_km"],
@@ -184,11 +184,7 @@ def build_lognormal_design(df: pd.DataFrame) -> pd.DataFrame:
     return sm.add_constant(design, has_constant="add")
 
 
-def _fit_lognormal_internal(
-    df: pd.DataFrame,
-    *,
-    annotate: bool,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Optional[pd.DataFrame]]:
+def _fit_lognormal_internal(df, *, annotate):
     models: Dict[str, Dict[str, float]] = {}
     metrics: Dict[str, Dict[str, float]] = {}
     annotated = df.copy() if annotate else None
@@ -234,16 +230,12 @@ def _fit_lognormal_internal(
     return models, metrics, annotated
 
 
-def fit_lognormal_glm(df: pd.DataFrame) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+def fit_lognormal_glm(df):
     models, metrics, _ = _fit_lognormal_internal(df, annotate=False)
     return models, metrics
 
 
-def fit_lognormal_with_predictions(df: pd.DataFrame) -> Tuple[
-    Dict[str, Dict[str, float]],
-    Dict[str, Dict[str, float]],
-    pd.DataFrame,
-]:
+def fit_lognormal_with_predictions(df):
     models, metrics, annotated = _fit_lognormal_internal(df, annotate=True)
     if annotated is None:
         annotated = df.copy()
@@ -251,12 +243,12 @@ def fit_lognormal_with_predictions(df: pd.DataFrame) -> Tuple[
 
 
 def load_travel_samples(
-    taxi_paths: Sequence[Path],
-    bike_root: Path,
-    bike_glob: str,
-    taxi_max_rows: Optional[int],
-    bike_max_rows: Optional[int],
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    taxi_paths,
+    bike_root,
+    bike_glob,
+    taxi_max_rows,
+    bike_max_rows,
+):
     taxi_frames = []
     for path in taxi_paths:
         if not path.exists():
@@ -281,7 +273,7 @@ def load_travel_samples(
     return taxi, bike, combined
 
 
-def _parse_distance_start(label: str) -> float:
+def _parse_distance_start(label):
     try:
         return float(label.replace("km", "").split("-")[0])
     except Exception:

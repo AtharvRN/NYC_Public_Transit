@@ -190,7 +190,19 @@ with st.spinner("Loading wait-time summaries..."):
 taxi_wait_lookup = build_wait_lookup(taxi_wait_df)
 bike_wait_lookup = build_wait_lookup(bike_wait_df)
 taxi_coord_lookup = build_coord_lookup(centroids, id_candidates=('LocationID', 'location_id'))
-bike_coord_lookup = build_coord_lookup(stations, id_candidates=('station_id', 'StationID'))
+bike_coord_lookup = build_coord_lookup(
+    stations,
+    id_candidates=('catchment_id', 'start_station_id', 'StationID'),
+    lat_candidates=('catchment_lat', 'lat', 'latitude'),
+    lon_candidates=('catchment_lon', 'lon', 'longitude', 'lng'),
+)
+
+station_lookup = None
+if stations is not None and not stations.empty and 'start_station_id' in stations.columns:
+    station_lookup = (
+        stations.drop_duplicates(subset='start_station_id')
+        .set_index('start_station_id')
+    )
 
 def safe_travel_estimate(mode, distance_km, is_rush, is_weekend, fallback_speed):
     try:
@@ -285,14 +297,20 @@ if stations is not None and not stations.empty:
     end_id, end_lat, end_lon, end_dist = nearest_point(
         stations, st.session_state["dest_lat"], st.session_state["dest_lon"], "start_station_id"
     )
+    start_meta = station_lookup.loc[start_id] if station_lookup is not None and start_id in station_lookup.index else None
+    end_meta = station_lookup.loc[end_id] if station_lookup is not None and end_id in station_lookup.index else None
+    start_catchment = start_meta.get('catchment_id') if start_meta is not None else None
+    end_catchment = end_meta.get('catchment_id') if end_meta is not None else None
     bike_start = {
         "id": start_id,
+        "catchment_id": start_catchment if isinstance(start_catchment, str) else start_id,
         "lat": start_lat,
         "lon": start_lon,
         "distance_km": start_dist,
     }
     bike_end = {
         "id": end_id,
+        "catchment_id": end_catchment if isinstance(end_catchment, str) else end_id,
         "lat": end_lat,
         "lon": end_lon,
         "distance_km": end_dist,
@@ -455,7 +473,7 @@ if bike_rates is not None and bike_start and bike_end:
     fallback_bike = np.nan if not np.isfinite(lam_bike) or lam_bike <= 0 else 1 / lam_bike
     wait_bike = pick_wait_minutes(
         bike_wait_lookup,
-        bike_start['id'],
+        bike_start['catchment_id'],
         hour,
         is_weekend=is_weekend_choice,
         is_rush=rush_flag,

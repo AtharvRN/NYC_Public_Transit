@@ -356,11 +356,14 @@ class WaitDashboard:
                 display(fig)
                 display(metrics.summary_frame())
 
+        # Attach observers FIRST
         location_dd.observe(lambda *_: refresh(), names="value")
         cohort_dd.observe(lambda *_: refresh(), names="value")
         freq_dd.observe(lambda *_: refresh(), names="value")
-
+        
+        # Then do initial refresh
         refresh()
+        
         return widgets.VBox(
             [
                 widgets.HTML(f"<h3>{self.title}</h3>"),
@@ -369,7 +372,6 @@ class WaitDashboard:
                 out,
             ]
         )
-
 
 def _prepare_taxi_trips(
     paths: Sequence[Path],
