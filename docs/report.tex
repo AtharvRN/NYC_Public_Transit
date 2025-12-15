@@ -14,119 +14,144 @@
   citecolor=blue
 }
 
-\title{NYC Taxi vs Citi Bike Wait- and Travel-Time Estimation}
-\author{ECE 225A --  Project \\ Atharv Nair (A69042035), Nitin Shreyes (A69041917)}
-\date{\today}
+\title{Stochastic Modeling of Urban Mobility in New York City}
+\author{ECE 225A Final Project \\ Atharv Nair (A69042035), Nitin Shreyes Venkatesan (A69041917) \\ \url{https://nycpublictransit.streamlit.app/}}
+\date{December 14, 2025}
 
 \begin{document}
 
 \maketitle
 
-\begin{abstract}
-We build a reproducible pipeline for comparing New York City taxi and Citi Bike service quality. The first pillar estimates rider wait times by modeling quarter-hour arrivals (split by rush/off-peak and weekday/weekend) as Poisson / Negative-Binomial processes and translating inter-arrival times into exponential wait-time distributions. The second pillar focuses on travel-time estimation: we fit discrete Gamma distributions per distance cohort and a continuous lognormal accelerated failure-time model—augmented with an e-bike indicator—that removes the need for coarse bins. Both tracks feed a Streamlit decision-support dashboard backed by cached Parquet/JSON artifacts. This report describes the data, modeling choices, UX considerations, and future work.
-\end{abstract}
-
 \section{Introduction}
-Even a short Manhattan hop raises the question: \emph{Is it quicker to unlock a Citi Bike or flag a yellow cab?} Taxi supply, dock availability, and demand swing minute by minute, so rule-of-thumb advice (“taxis are faster at night”) quickly breaks down. Instead of mimicking a full routing engine we zoom in on the probability distributions that control two door-to-door components:
+New Yorkers often pick between a yellow cab and Citi Bike for medium-length trips. The choice is not always straightforward: taxis usually arrive faster, yet bikes are cheaper, greener, and sometimes more predictable in gridlocked streets. To reason about this trade-off we quantify \emph{how much slower biking really is} across neighborhoods and times of day. Rather than mimic a full routing engine we zoom in on the probability distributions that control two door-to-door components (code: \url{https://github.com/AtharvRN/NYC_Public_Transit}):
 \begin{itemize}[nosep]
   \item \textbf{Wait time.} How long until a taxi arrives or a bike becomes available in the nearby dock cluster?
   \item \textbf{Travel time.} Once a rider is moving, how long will the trip take as a function of distance and traffic patterns?
 \end{itemize}
 
-To answer these questions we fit probability distributions directly to the NYC Taxi and Citi Bike datasets (Jan--Jun 2024). Arrivals are modeled with Poisson/Negative-Binomial processes and converted to exponential wait distributions, while trip durations are handled with Gamma cohorts and a lognormal accelerated failure-time model. Both estimates feed a public Streamlit app (\url{https://nycpublictransit.streamlit.app/}) that lets users click origin/destination pairs and instantly compare modes (Fig.~\ref{fig:app-preview}).
+To answer these questions we fit probability distributions directly to the NYC Taxi and Citi Bike datasets (Jan-Jun 2024). We analyze Poisson and Negative-Binomial hourly arrival counts along with Weibull inter-arrival gaps for diagnostic purposes, but the deployed wait estimator ultimately uses the implied exponential mean because it matches the observed inter-arrival histogram. Likewise, we study Gamma cohorts to understand distance-dependent variance, but the app relies on a lognormal regression for travel minutes because it provides smooth predictions without bin boundaries. Both estimates feed a public Streamlit app that lets users click origin/destination pairs and instantly compare modes (Fig.~\ref{fig:app-preview}).
 
 Assumptions and design choices:
 \begin{itemize}[nosep]
-  \item Wait times rely on inter-arrival gaps as a proxy for rider experience. Stations within 200\,m are pooled into “catchments” to reflect a rider’s willingness to walk to the next dock.
-  \item Travel-time samples are restricted to 1--120 minutes and within 12 km to keep Citi Bike and taxi cohorts comparable. Forecasts outside this range fall back to coarser heuristics.
-  \item We only use features available historically (distance, rush/weekend indicators, e-bike/classic flag). Weather, incidents, dynamic pricing, and subway usage are left for future work.
+  \item Wait times rely on inter-arrival gaps as a proxy for rider experience.
+  \item Travel-time samples are restricted to 1-120 minutes and within 12 km to keep Citi Bike and taxi cohorts comparable. Forecasts outside this range fall back to coarser heuristics.
+  \item We only use features available historically (distance plus rush/weekend indicators). Weather, incidents, dynamic pricing, and subway usage are left for future work; adding subway headways is an obvious extension.
 \end{itemize}
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.95\linewidth]{figures/ui_placeholder.png}
-  \caption{Public dashboard (\url{https://nycpublictransit.streamlit.app/}) showing taxi vs Citi Bike recommendations for arbitrary O/D pairs.}
+  \includegraphics[width=0.95\linewidth]{figures/website.png}
+  \caption{Public dashboard showing taxi vs Citi Bike recommendations for arbitrary O/D pairs.}
   \label{fig:app-preview}
 \end{figure}
 
-% \section{Data Sources \& Preprocessing}
-% \textbf{Taxi.} Jan--Jun 2024 Yellow Taxi Parquet files from NYC TLC~\cite{nyctlc}. Each trip provides pickup/dropoff timestamps and mileage plus zone IDs. We join with TLC zone metadata to bin by neighborhood and compute inter-arrival counts.
+\begin{table*}[!t]
+  \centering
+  \caption{Key statistics for the Jan-Jun 2024 training data.}
+  \label{tab:data-stats}
+  \begin{tabular}{lp{0.35\linewidth}p{0.35\linewidth}}
+    \toprule
+    Metric & Taxi & Citi Bike \\
+    \midrule
+    Trips used in travel-time model & 17,550,334 & 18,253,964 \\
+    Unique pickup locations & 263 TLC zones & 2,336 stations \\
+    Months covered & Jan-Jun 2024 & Jan-Jun 2024 \\
+    Metadata & Distance, zone IDs & Station coords, rideable type \\
+    Active wait cohorts (location/hour/rush/weekend) & 5,975 & 47,876 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
 
-% \textbf{Citi Bike.} Jan--Jun 2024 Citi Bike trip CSVs from the public S3 mirror~\cite{citibike}. Each record contains start/end timestamps and station metadata. Distances are computed via haversine formulas using station coordinates.
+\section{Datasets}
+We use the official NYC TLC yellow taxi trip records~\cite{nyctlc} and the Citi Bike historical CSVs~\cite{citibike} for the first half of 2024. Both sources provide raw trip-level logs rather than aggregates, which allows us to recompute arrivals, wait gaps, and travel durations with consistent filters. Table~\ref{tab:data-stats} summarizes the dataset scales used in the deployed models. Subway feeds and weather data are not yet integrated; adding them is the next major item after stabilizing the taxi/bike comparisons.
 
-% \textbf{Derived artifacts.} Scripts generate:
-% \begin{itemize}[nosep]
-%   \item Station-level rate summaries (`taxi\_rates.parquet`, `citibike\_rates.parquet`) and zone/station coordinates.
-%   \item Wait-time caches (`taxi\_hourly\_waits.parquet/json`, `bike\_hourly\_waits.parquet/json`) with per-hour, rush/off-peak, weekend/weekday metrics.
-%   \item Travel-time bin stats (`travel\_bins.parquet`) and lognormal GLM coefficients (`travel\_lognormal\_glm.json`).
-% \end{itemize}
+\textbf{Yellow taxi.} Six Parquet files (`yellow\_tripdata\_2024-01` through `-06`) contribute 17.6 million filtered trips after removing zero-distance or $>$120 minute rides. Each record contains pickup/dropoff timestamps, trip distance (miles), and TLC pickup/dropoff zone IDs (263 unique zones citywide). When we need coordinates for instance to compute straight-line distance between origin and destination, we use the published TLC zone centroids and convert the haversine separation into kilometers. These columns let us (i) count hourly arrivals per zone for the wait-time analysis, and (ii) compute true travel minutes while regressing on a common distance measure for both taxis and bikes. Taxi fares, passenger counts, and payment types are present in the raw files but remain unused in this iteration.
 
-% \textbf{Builder scripts.} After notebook exploration we persist the fitted distributions via:
-% \begin{enumerate}[nosep]
-%   \item \texttt{python scripts/build\_wait\_stats.py --taxi-paths data/raw/yellow\_tripdata\_2024-*.parquet --cache-dir data/derived/wait\_stats --force}
-%   \item \texttt{python scripts/build\_travel\_stats.py --bike-root data/raw/citibike --bike-glob '20240*-citibike-tripdata\_*.csv' --output-dir data/derived/travel\_stats}
-% \end{enumerate}
-% These commands read the raw Parquet/CSV files, aggregate by the desired cohorts, and overwrite the caches consumed by Streamlit.
-\section{Dataset}
-\textbf{Taxi}
+\textbf{Citi Bike.} The Jan-Jun 2024 CSVs add 18.3 million rides spanning 2,223 unique start stations and 2,240 end stations. Each row includes start/end timestamps, station coordinates, rideable type (classic vs electric), and membership flag. Citi Bike coverage is highly concentrated in Manhattan and northwest Brooklyn; more than half of the rides originate in Manhattan and $\approx 450{,}000$ trips begin and end at the same dock (short rebalancing hops). Station-level timestamps feed both the arrival counts and the travel-time regression.
 
-\textbf{Citibike:}
-\begin{itemize}[nosep]
-  \item The dataset contains 18M entries spread across six months,01/2024 - 06/2024. 
-  \item Start Station and End Station along with their location coordinates were provided. 
-  \item Travel time was provided in 'i64' format.
-  \item Member/Casual, Electric/Classic bike information was also given
-  \item Around 2.2k unique start and stop locations were identified
-  \item Over 1.14M unique routes were identified, with top routes situated around Central Park
-  \item Top routes had high variance , denoting high density in paricular areas
-  \item Manhattan accounted for more than half the trips, followed by Bronx.
-  \item Over 450k entries have the same start and end stations.
-\end{itemize}
 \section{Wait-Time Estimation}
+\label{sec:wait}
 
-Our starting point was the textbook assumption that arrivals follow a Poisson process, meaning the hourly count $N_t$ for a zone or station has mean and variance both equal to $\lambda_h$. This worked in the busiest taxi zones but failed for bikes: weather swings or rebalancing trucks often sent the variance far above the mean. We therefore relaxed the model to a Negative-Binomial, which keeps the same mean $\lambda_h$ but adds a dispersion term so that quieter locations are no longer forced to look Poisson. The NB fit is purely about understanding how many pickups happen in each hour.
+Our starting point was the textbook assumption that hourly arrivals can be modeled as Poisson counts~\cite{wiki_poisson}, meaning the bucketed count $N_h$ for a zone or station has mean and variance both equal to $\lambda_h$. This worked in the busiest taxi zones but failed for bikes: weather swings or rebalancing trucks often sent the variance far above the mean. We therefore relaxed the model to a Negative-Binomial distribution~\cite{wiki_negbin}, which keeps the same mean $\lambda_h$ but adds a dispersion term so that quieter locations are no longer forced to look Poisson. These arrival-count fits are useful for diagnostics, but the deployed wait estimator does not directly use the NB parameters.
 
-Once an arrival rate is available we need an approximate wait time. We cannot observe actual rider waits, so we use the \emph{inter-arrival gap}—the time difference between two consecutive pickups—as a proxy. This is imperfect: it assumes riders show up uniformly at random and that bikes/taxis are immediately available once a previous customer leaves. In reality someone could arrive during a lull or a bike dock might be empty even though the last checkout just happened. Still, the proxy aligns well with intuition and gives us a measurable quantity.
+We cannot observe actual rider waits, so we use the \emph{inter-arrival gap} the time difference between two consecutive pickups as a proxy. This is imperfect: it assumes riders show up uniformly at random and that bikes/taxis are immediately available once a previous customer leaves. In reality, someone could arrive during a lull, or a bike dock might be empty even though the last checkout just happened. Still, the proxy is intuitive and provides a measurable quantity when actual wait data are absent.
 
-Plotting the inter-arrival gaps revealed a clear exponential shape for both taxis and bikes (after pooling nearby docks into catchment areas). Figure~\ref{fig:model-diagnostics} shows two representative cohorts in the \emph{top row}: the empirical histogram (blue) decays at roughly the same rate as the exponential curve (green), while the Poisson and Negative-Binomial fits describe the arrival counts themselves. Because the exponential mean equals $1/\lambda$ we can turn each hourly arrival rate into a wait-time estimate with a single formula. These exponentials become the default wait model inside the Streamlit app, while the NB parameters remain in the cache for diagnostics and future improvements.
+For every zone or station we compute hourly arrival rates $\lambda_{z,h}$ split by rush vs.\ off-peak and weekday vs.\ weekend. The associated inter-arrival gaps align closely with an exponential distribution, so each bucket is summarized by its single $\lambda$ parameter. Because the exponential mean equals $1/\lambda$ hours (= $60/\lambda$ minutes) we turn every hourly arrival rate into a wait-time estimate with a single formula. At inference time the app simply looks up the relevant $\lambda_{z,h}$ bucket, converts it to minutes via $60/\lambda$, and predicts the wait time.
 
+Figure~\ref{fig:model-diagnostics} validates the shape visually. The \emph{top-left} panel corresponds to the Financial District Citi Bike station during a weekend rush hour: the arrival histogram (blue bars) decays quickly, the Negative-Binomial curve slightly outperforms the Poisson baseline, and the exponential wait curve (green) sits on top of the empirical gaps. The \emph{top-right} panel repeats the same story for taxi zone~3905.15 on a weekday off-peak hour, highlighting that high-throughput TLC zones exhibit the same exponential signature.
 \section{Travel-Time Estimation}
 
-\subsection{Gamma cohorts}
-Travel time is inherently positive and skewed; the Gamma distribution is a natural parametric family on $(0,\infty)$ with shape-scale parameters determined by the first two moments. By binning trips into distance slices (2\,km wide) and rush/weekend strata we obtain cohorts that are approximately homoscedastic, so the Gamma assumption provides a quick descriptive summary: the mean captures central tendency, while the shape parameter indicates how peaked vs.\ heavy-tailed the cohort is. This is conceptually analogous to fitting an Erlang distribution for service times, which is widely used in queueing theory. Gamma cohorts therefore serve as a pedagogical baseline and a sanity check for the more flexible model.
+We start by looking at simple \textbf{Gamma cohorts}. Trips are grouped by mode, 2\,km distance buckets, and rush/weekend flags; the mean and variance within each group define a Gamma curve, so there is one set of parameters per cohort. These cohorts are valuable for diagnostics because they mirror Erlang-style service models widely used in queuing analysis~\cite{gross_harris}, but they are not served directly in the app. When the bin spans a wide distance range the empirical histogram can keep a sharp mode near short rides while the Gamma curve spreads mass across the entire bucket, effectively mixing several sub-distributions into one and softening the peak. That limitation motivates a model that operates at the trip level instead of pre-binning.
 
-\subsection{Lognormal accelerated failure-time model}
-While Gamma bins are interpretable, they suffer from two theoretical limitations: (i) boundaries introduce discontinuities as a rider crosses 3.99\,km vs.\ 4.01\,km, and (ii) they ignore the smooth nonlinear effect of distance. A continuous accelerated failure-time (AFT) model addresses both shortcomings. The lognormal AFT assumption posits that $\log T$ is Gaussian, meaning $T$ is positive with multiplicative noise—precisely the pattern seen in empirical travel-time distributions where relative errors remain roughly constant across trip lengths. The quadratic distance terms ($d$ and $d^2$) allow the mean log-time to curve, capturing the diminishing marginal penalty of distance once cruising speed stabilizes. Binary covariates for rush hours, weekends, and e-bike usage enter additively in log space, so they scale trip times multiplicatively in the original units (e.g., $\beta_{\text{ebike}}<0$ implies a constant percentage speed-up for e-bikes regardless of distance). Once coefficients are learned via maximum likelihood (equivalent to OLS on $\log T$), the expected travel time is $\mathbb{E}[T]=\exp(\mu + \sigma^2/2)$, inheriting the full lognormal distribution for uncertainty quantification. Table~\ref{tab:lognormal} lists the fitted parameters and demonstrates that the model respects known physics: distances dominate, rush hours inflate taxi durations, and e-bikes enjoy a sizable negative shift.
+Because we want smooth predictions for any distance, we train one \textbf{lognormal regression} over all trips (no distance or rush splits there is just one taxi model and one bike model). Lognormal regressions are widely used to describe positively skewed durations in reliability and survival analysis~\cite{lawless}, making them a natural fit for travel minutes. A Gaussian model in raw minutes would perform poorly: travel times are strictly positive and exhibit long right tails (traffic jams, detours), so normality would assign nonzero probability to negative durations and treat outliers as symmetric deviations. The lognormal assumption keeps the lower bound at zero and stretches the upper tail more realistically. Let $T$ denote travel minutes for a trip with distance $d$. We model
+\[
+\log T = \beta_0 + \beta_1 d + \beta_2 d^2 + \beta_3 I_{\text{rush}} + \beta_4 I_{\text{weekend}} + \varepsilon,
+\]
+where $\varepsilon \sim \mathcal{N}(0,\sigma^2)$. The design matrix is passed to \texttt{statsmodels.api.GLM}, whose iteratively reweighted least-squares solver (backed by SciPy) maximizes the Gaussian log-likelihood to obtain $\hat{\beta}$ and $\hat{\sigma}^2$. Coefficients therefore correspond to percentage changes in expected time: multiplying $d$ by one kilometer adjusts the log mean by $\beta_1$, so the minutes scale by $e^{\beta_1}$. Table~\ref{tab:lognormal} shows that bikes reduce travel time by roughly $2.5\%$ ($e^{-0.025}$), while rush-hour increases taxi time by about $6\%$ ($e^{0.059}$).
 
-\begin{table}[h]
+Inference in the regression world is even simpler: we plug the requested trip’s distance and rush/weekend flags into the fitted linear equation, obtain $\hat{\mu} = X \hat{\beta}$, and convert back to minutes with the lognormal mean formula $\hat{T} = \exp(\hat{\mu} + 0.5 \hat{\sigma}^2)$. This correction term accounts for the asymmetry introduced by exponentiation. With only two parameter sets (taxi vs.\ bike), the app avoids sparse-cohort lookups yet still mirrors the Gamma diagnostics discussed earlier.
+
+\begin{table}[t]
   \centering
-  \caption{Lognormal GLM parameters extracted from \texttt{travel\_lognormal\_glm.json}.}
-  \label{tab:lognormal}
-  \begin{tabular}{lrrrrr}
+  \caption{Lognormal GLM fit metrics (log space).}
+  \label{tab:lognormal-metrics}
+  \begin{tabular}{lrrrr}
     \toprule
-    Mode & $\sigma$ & $\beta_d$ & $\beta_{d^2}$ & $\beta_{\text{rush}}$ & $\beta_{\text{ebike}}$ \\
+    Mode & Samples & $\sigma_{\log}$ & $R^2_{\log}$ & $\text{MAE}_{\log}$ \\
     \midrule
-    Taxi & 0.391 & 0.499 & $-0.031$ & 0.059 & 0.000 \\
-    Bike & 0.485 & 0.702 & $-0.049$ & $-0.025$ & $-0.193$ \\
+    Taxi & 17,550,334 & 0.391 & 0.618 & 0.300 \\
+    Bike & 18,253,964 & 0.485 & 0.622 & 0.331 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Quality metrics (log-space $R^2\approx0.62$ and MAE$\approx0.33$ for bikes) indicate the quadratic distance term handles most variance, while rush/weekend dummies provide smaller adjustments. When the GLM fails (e.g., long-distance inputs outside the 12 km cap) the system falls back to the Gamma bin mean, and finally to a heuristic constant-speed estimate. The bottom row of Fig.~\ref{fig:model-diagnostics} shows how the GLM smooths the Gamma histogram for taxi and Citi Bike 0--2 km rush-hour cohorts without losing interpretability.
-
-
-\begin{figure*}[p]
+\begin{table}[t]
   \centering
-  \begin{minipage}{0.48\linewidth}
-    \includegraphics[width=\linewidth]{figures/taxi_wait.png}
-    \vspace{0.2em}
-    \centerline{\small Taxi wait: zone 3905.15, weekday off-peak}
-  \end{minipage}
-  \hfill
+  \caption{Lognormal GLM parameters ($\log$-minutes scale).}
+  \label{tab:lognormal}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lrrrrrrr}
+    \toprule
+    Mode & $\sigma$ & $\beta_0$ & $\beta_d$ & $\beta_{d^2}$ & $\beta_{\text{rush}}$ & $\beta_{\text{weekend}}$  \\
+    \midrule
+    Taxi & 0.391 & 1.276 & 0.499 & $-0.031$ & 0.059 & $-0.106$  \\
+    Bike & 0.485 & 1.218 & 0.702 & $-0.049$ & $-0.025$ & 0.079  \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+Quality metrics (log-space $R^2\approx0.62$ and MAE$\approx0.33$ for bikes) indicate the simple feature set explains most of the variance; rush/weekend dummies only add small adjustments once distance is accounted for. Combined with Figure~\ref{fig:model-diagnostics}, these metrics show the lognormal regression is a better fit (especially for bikes) than the cohort baseline.
+
+The \emph{bottom} panels of Fig.~\ref{fig:model-diagnostics} zoom in on 0-2\,km taxi rides (left) and the analogous Citi Bike cohort (right). In both cases the Gamma histogram (orange) flattens the sharp mode, whereas the lognormal PDF (red) traces the empirical bars and preserves the peak—the improvement is most visible for Citi Bike, reinforcing the numerical lift reported above.
+\begin{table}[t]
+  \centering
+  \caption{Out-of-sample errors (minutes) for lognormal vs.\ Gamma cohorts.}
+  \label{tab:error-metrics}
+  \begin{tabular}{llrr}
+    \toprule
+    Mode & Model & MAE & RMSE \\
+    \midrule
+    Taxi & Lognormal GLM & 3.83 & 5.64 \\
+    Taxi & Gamma cohorts & 3.97 & 5.64 \\
+    Bike & Lognormal GLM & 4.40 & 8.51 \\
+    Bike & Gamma cohorts & 4.81 & 8.42 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+\begin{figure*}[t]
+  \centering
   \begin{minipage}{0.48\linewidth}
     \includegraphics[width=\linewidth]{figures/citi_wait.png}
     \vspace{0.2em}
-    \centerline{\small Citi Bike wait: Financial District, weekend rush}
+    \centerline{\small Citi Bike wait time: zone 3905.15, weekend rush}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.48\linewidth}
+    \includegraphics[width=\linewidth]{figures/taxi_wait.png}
+    \vspace{0.2em}
+    \centerline{\small Taxi wait time: zone  Financial District, weekday off-peak}
   \end{minipage}
 
   \vspace{1em}
@@ -134,62 +159,69 @@ Quality metrics (log-space $R^2\approx0.62$ and MAE$\approx0.33$ for bikes) indi
   \begin{minipage}{0.48\linewidth}
     \includegraphics[width=\linewidth]{figures/taxi_travel.png}
     \vspace{0.2em}
-    \centerline{\small Taxi travel: $0$--$2$ km, rush-hour weekday}
+    \centerline{\small Taxi travel time: $0$-$2$ km, rush-hour weekday}
   \end{minipage}
   \hfill
   \begin{minipage}{0.48\linewidth}
     \includegraphics[width=\linewidth]{figures/bike_travel.png}
     \vspace{0.2em}
-    \centerline{\small Citi Bike travel: $0$--$2$ km, rush-hour weekday}
+    \centerline{\small Citi Bike travel time: $0$-$2$ km, rush-hour weekday}
   \end{minipage}
 
-  \caption{Model diagnostics spanning the two modeling tasks: top row shows arrival/wait fits (Section~3), bottom row shows travel-time Gamma vs lognormal fits (Section~4).}
+  \caption{Model diagnostics for a specific taxi zone and Citi Bike station. The notebook tooling can regenerate these overlays for any location; top row shows arrival/wait fits (Section~3) and bottom row compares travel time Gamma vs lognormal fits (Section~4).}
   \label{fig:model-diagnostics}
 \end{figure*}
 
-\section{Streamlit Dashboard}
-The front end (\url{https://github.com/AtharvRN/NYC_Public_Transit}) uses Streamlit to let users:
-\begin{itemize}[nosep]
-  \item Pick origin/destination on an interactive map (Folium).
-  \item View taxi vs bike wait times for the selected locations, with automatic fallbacks to the nearest station if the exact cohort is missing.
-  \item See travel-time estimates using the lognormal GLM (with Gamma fallback).
-  \item Compare total journey time distributions.
-\end{itemize}
+\section{Website}
+We have deployed the website using Streamlit (\url{https://nycpublictransit.streamlit.app/}) . A typical session proceeds as follows:
+\begin{enumerate}[nosep]
+  \item \textbf{Select points.} Users drop origin/destination markers on the Folium base map or enter addresses via the text boxes. The app snaps each marker to the nearest taxi zone centroid and Citi Bike station.
+  \item \textbf{Inspect wait times.} The sidebar lists the estimated taxi wait (based on the hourly exponential mean) and Citi Bike wait for the closest station. If a cohort lacks data, the app automatically falls back to the nearest location with cached parameters.
+  \item \textbf{Compare travel times.} Below the wait panel, cards show the lognormal travel-time prediction for each mode and the implied total journey (wait + travel + walking).
+  \item \textbf{Drill into diagnostics.} A table and optional chart summarize the distributions so users can see whether rush hours or weekends materially change the recommendation.
+\end{enumerate}
 
-\subsection{UX Notes}
-Tabs separate taxi/bike diagnostics; tooltips explain why certain cohorts are disabled (insufficient samples). We plan to add UI screenshots here (placeholder Fig.~\ref{fig:ui}).
+Figure~\ref{fig:app-preview} highlights the hero section (map plus summary table). Figure~\ref{fig:app-detail} zooms into the lower pane, where the stacked bars, winner callout, and calculation accordion reveal exactly how the underlying wait and travel components add up.
 
 \begin{figure}[t]
   \centering
-  \fbox{\includegraphics[width=0.95\linewidth]{figures/ui_placeholder.png}}
-  \caption{Streamlit UI mock/screenshot placeholder.}
-  \label{fig:ui}
+  \includegraphics[width=0.95\linewidth]{figures/website_detail.png}
+  \caption{Detail view of the website showing total travel comparison, fastest-mode callout, and calculation breakdown for both modes.}
+  \label{fig:app-detail}
 \end{figure}
 
 \section{Limitations \& Future Work}
-\begin{itemize}[nosep]
-  \item \textbf{Modeling assumptions:} Wait-times use inter-arrival proxies; no weather or traffic features; GLM only uses distance/rush/weekend/e-bike.
-  \item \textbf{Distance calculation:} Haversine distance does not account to the roads and turns involved in reaching the end location
-  \item \textbf{Data coverage:} Only Jan--Jun 2024; Citi Bike GPS routes or real-time inventory (docks per station) are not modeled.
-  \item \textbf{Costs:} Trip fares are not surfaced; taxi Parquet files contain the needed columns but Citi Bike pricing must be inferred from membership tiers.
-  \item \textbf{Scalability:} Subway data is not integrated yet—downloading GTFS and MTA ridership feeds is planned but time-consuming.
-  \item \textbf{Future features:} Add uncertainty bands, enable user-uploaded O/D pairs, integrate subway travel-time estimators, and experiment with probabilistic travel-time percentiles.
-\end{itemize}
+This project is purposely lightweight: it is \emph{not} a routing engine and it does not compete with Google Maps or similar trip planners. The goal was to test whether textbook probability distributions, exponential waits and lognormal travel times, can yield useful intuition when fed with public datasets. Scaling the pipeline to citywide routing would require map matching, real-time feeds, multimodal transfers, and heavy infrastructure that are well beyond our scope. The dashboard should therefore be viewed as an explainer built on simple statistics rather than a production navigation tool.
+
+Several technical limitations remain. Wait times are derived from inter-arrival proxies, so they ignore weather, traffic, staging policies, and rider behavior. This shortcut likely inflates Citi Bike waits: the time between two checkouts does not guarantee a bike was unavailable for that entire interval, so sparse stations can exhibit artificially large means. Travel times only use haversine distance, rush-hour flags, weekend flags, and the e-bike indicator; road geometry, one-way streets, and turning delays are not modeled, which limits accuracy for longer trips. Data coverage is also narrow, only Jan-Jun 2024, and Citi Bike inventory levels or GPS traces are absent, so we cannot validate how quickly docks refill. Costs are another gap: taxi fares exist in the TLC files but were not surfaced, and Citi Bike pricing depends on membership tiers we do not track. Subway feeds (GTFS schedules, real-time headways) remain on the backlog; integrating them would make the taxi vs bike comparison more balanced but requires additional parsing and modeling. Finally, richer future work includes adding uncertainty bands around predictions, letting users upload bulk origin/destination pairs, and reporting travel-time percentiles rather than just means. These expansions would move the tool closer to operational relevance while preserving the explainable distribution-first approach.
 \section{Discussion}
-Speed modelling was the other approach used to estimate travel time. Similar to earlier methods, the data were grouped according to rush hours and weekends. However, due to the limited number of entries for many unique routes, this grouping scheme was not able to properly distinguish between different routes. Furthermore, across all four categorizations, the observations were heavily concentrated around the mean, leading to underdispersion. As a result, Poisson and negative binomial distributions were not suitable for capturing the underlying variability in travel times. Instead, a Weibull distribution was adopted, as it provided a higher AIC score compared to the gamma and lognormal alternatives.
+Several modeling ideas were explored but ultimately set aside in favor of the exponential/lognormal pair documented earlier. We summarize the most relevant experiments here for completeness.
 
-In contrast to the taxi dataset, not all entries in the Citi Bike data contributed meaningfully to modelling New York’s traffic conditions. More than 450,000 entries had identical start and end stations. Many of these trips were concentrated around peak tourist locations, such as Central Park 6 Ave, where over 12\% of rides began and ended at the same station. While such usage patterns are reasonable in practice—for example, casual tourist rides that start and end at the same landmark—they reduce the effective amount of information available for our traffic-focused modelling, since the perceived volume of data is much larger than the subset that is actually informative for our purposes.
+\textbf{Speed-based travel model.} We also explored framing travel time as distance divided by a stochastic speed distribution. Trips were grouped by rush/weekend and fit with Weibull, Gamma, and lognormal densities. The Weibull model achieved the best AIC~\cite{akaike1974} because its hazard rate can capture the rapid increase in delays after $\approx 10$\,km, but the approach required fine-grained routing geometry to convert O/D pairs into realistic path lengths. Without that context, the speed fit collapsed to an average pace (e.g., $\approx 15$\,km/h for Citi Bike) that was indistinguishable from our simpler distance-based regression, so we didn't pursue this further.
 
-Arrival-count modelling for both datasets also did not conform well to a Poisson distribution. A likely explanation is the dependence of arrival counts on time-varying and context-specific factors such as time of day, day of the week, public holidays, and city events. These factors introduce strong temporal patterns and clustering in arrivals, violating the Poisson assumptions of independence and a constant arrival rate over the counting interval. While our datasets did not include explicit information on these finer-grained covariates, incorporating them would have required a more complex model and substantially more data than were available. For instance, in the Citi Bike dataset, although the total number of rows was large, the number of rides within a specific hour on a given weekday (e.g., a Wednesday) was in the single digits for many stations in cases, limiting our ability to reliably model hourly arrival patterns.
+
+\textbf{Loop trips and data quality.} Analysis of the Citi Bike logs revealed 0.45\,M rides that began and ended at the same dock, with neighborhoods such as Central Park 6 Ave contributing more than 12\% of their volume to sightseeing loops. These records inflate the overall row count yet offer little signal for commuter-focused travel models because the observed duration mostly reflects leisure time rather than mobility demand. Consequently, we keep them in the raw data (for completeness) but down-weight their influence by filtering to 1-120 minute trips and focusing on distance-based features.
+
+\textbf{Arrival Count alternatives.} Before adopting the exponential inter-arrival proxy, we explored staying fully within the Poisson framework. The appeal was its closed-form waits and neat thinning/superposition properties, but the empirical histograms—especially for Citi Bike docks hit by rebalancing or weather swings—showed clear overdispersion, so the Poisson curves consistently underestimated the tails. We therefore tried a Negative-Binomial layer purely for diagnostics, then ultimately relied on the inter-arrival gaps described in Section~\ref{sec:wait}.
+
+These exploratory threads hinted at additional directions—alternative speed models, loop-trip filters, richer arrival-count fits—but pursuing them would have required more data and engineering time than we budgeted for this prototype.
 
 
 
 \section{Conclusion}
-We delivered a reproducible workflow: raw data ingestion, exploratory notebooks, lognormal travel-time modeling with e-bike adjustments, cached wait-time summaries, and a Streamlit app that gracefully degrades to nearby stations. The lognormal GLM improves Citi Bike estimates substantially over Gamma bins while keeping the pipeline explainable. Next steps include richer covariates, explicit cost modeling, subway integration, and automated CI for the derived artifacts.
+We analyzed wait times and travel times for NYC taxis and Citi Bike, exported the fitted parameters, and deployed the resulting predictions in a Streamlit website. Full preprocessing scripts, notebooks, and deployment steps live in the public repository at \url{https://github.com/AtharvRN/NYC_Public_Transit}, so the entire workflow can be reproduced or extended.
+
+\section{AI Use}
+We used an AI coding assistant (OpenAI Codex) throughout development to draft boilerplate code, outline problem formulations, and edit this report. Each suggestion especially anything touching statistical modeling was reviewed and validated manually before inclusion, and all final code was checked into version control after local testing.
 
 \begin{thebibliography}{9}
 \bibitem{nyctlc} NYC Taxi \& Limousine Commission, ``TLC Trip Record Data,'' \url{https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page}
 \bibitem{citibike} Citi Bike NYC, ``Historical Trip Data,'' \url{https://s3.amazonaws.com/tripdata/index.html}
+\bibitem{wiki_poisson} Wikipedia, ``Poisson distribution,'' accessed Dec.~14,~2025, \url{https://en.wikipedia.org/wiki/Poisson_distribution}
+\bibitem{wiki_negbin} Wikipedia, ``Negative binomial distribution,'' accessed Dec.~14,~2025, \url{https://en.wikipedia.org/wiki/Negative_binomial_distribution}
+\bibitem{wiki_gamma} Wikipedia, ``Gamma distribution,'' accessed Dec.~14,~2025, \url{https://en.wikipedia.org/wiki/Gamma_distribution}
+\bibitem{gross_harris} D. Gross and C. M. Harris, \emph{Fundamentals of Queueing Theory}, Wiley, 1998.
+\bibitem{lawless} J. F. Lawless, \emph{Statistical Models and Methods for Lifetime Data}, Wiley, 2003.
 \end{thebibliography}
 
 \end{document}
