@@ -1,0 +1,47 @@
+{
+  "design_columns": [
+    "const",
+    "distance_km",
+    "distance_sq",
+    "is_rush",
+    "is_weekend"
+  ],
+  "models": {
+    "bike": {
+      "sigma": 0.48452398817553516,
+      "coefficients": {
+        "const": 1.2175887819479299,
+        "distance_km": 0.7018732943023069,
+        "distance_sq": -0.04906176147269068,
+        "is_rush": -0.02466234789403668,
+        "is_weekend": 0.07927396198319998,
+        "is_ebike": -0.19337540127404793
+      }
+    },
+    "taxi": {
+      "sigma": 0.39074166309025654,
+      "coefficients": {
+        "const": 1.2763786272044368,
+        "distance_km": 0.498827423549894,
+        "distance_sq": -0.030989241388854533,
+        "is_rush": 0.059075223935124904,
+        "is_weekend": -0.10602433892533525,
+        "is_ebike": 0.0
+      }
+    }
+  },
+  "metrics": {
+    "bike": {
+      "samples": 18253964,
+      "sigma": 0.48452398817553516,
+      "r_squared_log": 0.6216376111912538,
+      "mae_log": 0.33078836218869656
+    },
+    "taxi": {
+      "samples": 17550334,
+      "sigma": 0.39074166309025654,
+      "r_squared_log": 0.617673322844732,
+      "mae_log": 0.3004137529593242
+    }
+  }
+}
